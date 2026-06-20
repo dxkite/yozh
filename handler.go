@@ -104,6 +104,8 @@ func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request) {
 }
 
 // fullURL reconstructs the full request URL from the http.Request.
+// r.RequestURI is set by the HTTP server but empty for manually-created requests
+// (e.g. in tests), so fall back to r.URL.RequestURI().
 func fullURL(r *http.Request) string {
 	scheme := "http"
 	if r.TLS != nil || r.Header.Get("x-forwarded-proto") == "https" {
@@ -113,5 +115,9 @@ func fullURL(r *http.Request) string {
 	if host == "" {
 		host = "localhost"
 	}
-	return fmt.Sprintf("%s://%s%s", scheme, host, r.RequestURI)
+	uri := r.RequestURI
+	if uri == "" {
+		uri = r.URL.RequestURI()
+	}
+	return fmt.Sprintf("%s://%s%s", scheme, host, uri)
 }
