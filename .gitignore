@@ -1,0 +1,10 @@
+# Binaries
+*.exe
+*.exe~
+
+# Node
+node_modules/
+
+# Astro build output
+dist/
+.netlify/

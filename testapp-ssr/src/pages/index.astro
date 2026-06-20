@@ -1,0 +1,20 @@
+---
+import { products } from '../models/db';
+---
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Online Store</title>
+</head>
+<body>
+  <h1>Online Store</h1>
+  <ul>
+    {products.map(p => (
+      <li>
+        <a href={`/products/${p.id}`}>{p.name}</a> — ${p.price}
+      </li>
+    ))}
+  </ul>
+  <p><a href="/cart">View Cart</a></p>
+</body>
+</html>
