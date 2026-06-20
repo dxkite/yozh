@@ -196,9 +196,13 @@ try {
 	injectURLParser(ctx)
 	injectCryptoSubtle(ctx, keyReg)
 
-	// __goFetchRaw(url, method, headersJSON, body) — async Go HTTP client
-	// Returns JSON: { status, headers: [[k,v],...], body }
-	ctx.SetAsyncFunc("__goFetchRaw", func(this *qjs.This) {
+	// __goFetchRaw(url, method, headersJSON, body) — synchronous Go HTTP client.
+	// Blocks the QJS event loop goroutine until the HTTP response is received.
+	// wazero runs QJS in a single-threaded WASM module; goroutine callbacks from
+	// SetAsyncFunc race against the event loop and corrupt WASM memory. Using
+	// SetFunc with a blocking call is safe because only one goroutine ever touches
+	// the WASM instance at a time (the pool ensures exclusive runtime access).
+	ctx.SetFunc("__goFetchRaw", func(this *qjs.This) (*qjs.Value, error) {
 		args := this.Args()
 		urlStr, method, headersJSON, reqBody := "", "GET", "{}", ""
 		if len(args) > 0 {
@@ -213,19 +217,11 @@ try {
 		if len(args) > 3 && !args[3].IsNull() && !args[3].IsUndefined() {
 			reqBody = args[3].String()
 		}
-
-		go func() {
-			result, err := goFetch(urlStr, method, headersJSON, reqBody)
-			if err != nil {
-				errVal := this.Context().NewString(err.Error())
-				this.Promise().Reject(errVal)
-				errVal.Free()
-				return
-			}
-			resVal := this.Context().NewString(result)
-			this.Promise().Resolve(resVal)
-			resVal.Free()
-		}()
+		result, err := goFetch(urlStr, method, headersJSON, reqBody)
+		if err != nil {
+			return nil, err
+		}
+		return ctx.NewString(result), nil
 	})
 
 	return nil

@@ -1,6 +1,9 @@
 package integration_test
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -656,6 +659,229 @@ func TestAESCBCTamperedCiphertext(t *testing.T) {
 	})()`)
 	if r["result"] != "error" {
 		t.Errorf("AES-CBC wrong-length decrypt: expected error, got %v", r["result"])
+	}
+}
+
+// ── BFF capability tests ─────────────────────────────────────────────────────
+
+// TestBFFUpstreamFetch verifies that JS fetch() can call a real upstream HTTP service,
+// which is the fundamental requirement for Astro API Routes acting as BFF.
+func TestBFFUpstreamFetch(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1,"name":"Widget","price":9.99}`)
+	}))
+	defer upstream.Close()
+
+	pool := minimalPool(t, 1)
+
+	r := evalExpr(t, pool, fmt.Sprintf(`(async function() {
+		var res = await fetch('%s/products/1');
+		var data = await res.json();
+		return data.name;
+	})()`, upstream.URL))
+
+	if r["result"] != "Widget" {
+		t.Errorf("upstream fetch: got %v, want 'Widget'", r["result"])
+	}
+}
+
+// TestBFFAggregation verifies that BFF can call multiple upstream services and merge results.
+// Note: __goFetchRaw dispatches one Go goroutine per fetch; the wazero WASM module backing
+// QJS is single-threaded, so concurrent callbacks from multiple goroutines would race.
+// We therefore await each fetch sequentially — this matches how real Astro SSR API routes
+// should be written when targeting this runtime.
+func TestBFFAggregation(t *testing.T) {
+	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1,"name":"Gadget"}`)
+	}))
+	defer catalog.Close()
+
+	inventory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"stock":42}`)
+	}))
+	defer inventory.Close()
+
+	pool := minimalPool(t, 1)
+
+	r := evalExpr(t, pool, fmt.Sprintf(`(async function() {
+		var product  = await fetch('%s').then(r => r.json());
+		var inv      = await fetch('%s').then(r => r.json());
+		return JSON.stringify({ name: product.name, stock: inv.stock });
+	})()`, catalog.URL, inventory.URL))
+
+	var agg map[string]any
+	if err := json.Unmarshal([]byte(r["result"].(string)), &agg); err != nil {
+		t.Fatalf("parse aggregated result: %v", err)
+	}
+	if agg["name"] != "Gadget" {
+		t.Errorf("product name: got %v, want 'Gadget'", agg["name"])
+	}
+	if agg["stock"] != float64(42) {
+		t.Errorf("stock: got %v, want 42", agg["stock"])
+	}
+}
+
+// TestBFFGracefulDegradation verifies that a failed upstream (HTTP 500) is handled
+// without crashing the handler — the BFF returns partial data.
+func TestBFFGracefulDegradation(t *testing.T) {
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"Widget"}`)
+	}))
+	defer good.Close()
+
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+	}))
+	defer bad.Close()
+
+	pool := minimalPool(t, 1)
+
+	// Fetch both sequentially; check res.ok for degradation (avoid throw inside eval/await).
+	r := evalExpr(t, pool, fmt.Sprintf(`(async function() {
+		var r1 = await fetch('%s');
+		var product = r1.ok ? await r1.json() : null;
+		var r2 = await fetch('%s');
+		var reviews = r2.ok ? await r2.json() : null;
+		return JSON.stringify({ product: product ? product.name : null, reviews: reviews });
+	})()`, good.URL, bad.URL))
+
+	var out map[string]any
+	if err := json.Unmarshal([]byte(r["result"].(string)), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if out["product"] != "Widget" {
+		t.Errorf("good service: got %v, want 'Widget'", out["product"])
+	}
+	if out["reviews"] != nil {
+		t.Errorf("bad service should produce nil reviews, got %v", out["reviews"])
+	}
+}
+
+// TestBFFSessionMiddleware verifies the HMAC-based session token sign+verify pattern
+// used in src/middleware.ts: sign(btoa(userId)) → token → verify → decode userId.
+func TestBFFSessionMiddleware(t *testing.T) {
+	pool := minimalPool(t, 1)
+
+	r := evalExpr(t, pool, `(async function() {
+		var secret = 'test-session-secret';
+		var userId = 'user-abc-123';
+
+		var payload = btoa(userId);
+		var key = await crypto.subtle.importKey(
+			'raw', new TextEncoder().encode(secret),
+			{ name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']
+		);
+		var sigBuf = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+		var sig    = btoa(String.fromCharCode(...new Uint8Array(sigBuf)));
+		var token  = payload + '.' + sig;
+
+		var [p, s] = token.split('.');
+		var ok     = await crypto.subtle.verify(
+			'HMAC', key,
+			Uint8Array.from(atob(s), c => c.charCodeAt(0)),
+			new TextEncoder().encode(p)
+		);
+		return JSON.stringify({ ok: ok, userId: atob(p) });
+	})()`)
+
+	var out map[string]any
+	if err := json.Unmarshal([]byte(r["result"].(string)), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if out["ok"] != true {
+		t.Errorf("session token verify: expected true, got %v", out["ok"])
+	}
+	if out["userId"] != "user-abc-123" {
+		t.Errorf("session userId: got %v, want 'user-abc-123'", out["userId"])
+	}
+}
+
+// TestBFFCartCookieRoundTrip verifies the AES-GCM cart cookie pattern from src/pages/api/cart.ts:
+// encrypt(items) → base64(iv).base64(ciphertext) → decrypt → same items.
+func TestBFFCartCookieRoundTrip(t *testing.T) {
+	pool := minimalPool(t, 1)
+
+	r := evalExpr(t, pool, `(async function() {
+		var key = await crypto.subtle.generateKey({name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+		var items = [{id:1, name:'Widget', price:9.99, count:2}];
+		var b64 = function(u8) { return btoa(String.fromCharCode(...u8)); };
+
+		var iv  = crypto.getRandomValues(new Uint8Array(12));
+		var enc = await crypto.subtle.encrypt(
+			{name:'AES-GCM', iv:iv}, key,
+			new TextEncoder().encode(JSON.stringify(items))
+		);
+		var token = b64(iv) + '.' + b64(new Uint8Array(enc));
+
+		var parts = token.split('.');
+		var iv2   = Uint8Array.from(atob(parts[0]), c => c.charCodeAt(0));
+		var ct    = Uint8Array.from(atob(parts[1]), c => c.charCodeAt(0));
+		var dec   = await crypto.subtle.decrypt({name:'AES-GCM', iv:iv2}, key, ct);
+		var got   = JSON.parse(new TextDecoder().decode(dec));
+
+		return JSON.stringify({ count: got.length, name: got[0].name, qty: got[0].count });
+	})()`)
+
+	var out map[string]any
+	if err := json.Unmarshal([]byte(r["result"].(string)), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if out["count"] != float64(1) || out["name"] != "Widget" || out["qty"] != float64(2) {
+		t.Errorf("cart cookie round-trip: got %v", out)
+	}
+}
+
+// TestBFFUpstreamHMACAuth verifies that JS can attach HMAC-signed headers to outgoing requests
+// and a real upstream server can validate the signature — the pattern in src/lib/upstream.ts.
+func TestBFFUpstreamHMACAuth(t *testing.T) {
+	const secret = "upstream-signing-secret"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ts  := r.Header.Get("X-Timestamp")
+		sig := r.Header.Get("X-Signature")
+		if ts == "" || sig == "" {
+			http.Error(w, "missing auth", http.StatusUnauthorized)
+			return
+		}
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte(ts))
+		expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+		if sig != expected {
+			http.Error(w, "bad signature", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	pool := minimalPool(t, 1)
+
+	r := evalExpr(t, pool, fmt.Sprintf(`(async function() {
+		var secret = '%s';
+		var ts = String(Date.now());
+		var key = await crypto.subtle.importKey(
+			'raw', new TextEncoder().encode(secret),
+			{ name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+		);
+		var sigBuf = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(ts));
+		var sig = btoa(String.fromCharCode(...new Uint8Array(sigBuf)));
+
+		var res  = await fetch('%s/data', { headers: { 'X-Timestamp': ts, 'X-Signature': sig } });
+		var data = await res.json();
+		return JSON.stringify({ status: res.status, ok: data.ok });
+	})()`, secret, upstream.URL))
+
+	var out map[string]any
+	if err := json.Unmarshal([]byte(r["result"].(string)), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if out["status"] != float64(200) || out["ok"] != true {
+		t.Errorf("HMAC auth request: got %v", out)
 	}
 }
 
