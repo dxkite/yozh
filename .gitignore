@@ -8,3 +8,7 @@ node_modules/
 # Astro build output
 dist/
 .netlify/
+.astro/
+
+# integration/testdata contains committed build artifacts — do not ignore
+!integration/testdata/

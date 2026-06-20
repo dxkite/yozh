@@ -1,4 +1,4 @@
-package main
+package integration_test
 
 import (
 	"encoding/json"
@@ -9,20 +9,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	netlifyruntime "netlify-runtime"
 )
 
-// loadPool loads the testapp-ssr bundle and returns a pool with `size` runtimes.
-func loadPool(t *testing.T, size int) *Pool {
+// loadPool loads the pre-bundled testapp-ssr CJS from testdata.
+func loadPool(t *testing.T, size int) *netlifyruntime.Pool {
 	t.Helper()
-	entry := filepath.Join("testapp-ssr", ".netlify", "build", "entry.mjs")
-	if _, err := os.Stat(entry); os.IsNotExist(err) {
-		t.Skipf("testapp-ssr not built: %s not found — run: cd testapp-ssr && pnpm build", entry)
-	}
-	code, err := BundleSSR(entry)
+	bundle := filepath.Join("testdata", "testapp-ssr", "bundle.cjs")
+	code, err := os.ReadFile(bundle)
 	if err != nil {
-		t.Fatalf("BundleSSR: %v", err)
+		t.Fatalf("read testdata bundle: %v", err)
 	}
-	pool, err := NewPool(code, map[string]string{"NODE_ENV": "production"}, size)
+	pool, err := netlifyruntime.NewPool(code, map[string]string{"NODE_ENV": "production"}, size)
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -30,7 +29,7 @@ func loadPool(t *testing.T, size int) *Pool {
 }
 
 // do performs a single SSR request and returns the response recorder.
-func do(t *testing.T, pool *Pool, method, path, cookie, body string) *httptest.ResponseRecorder {
+func do(t *testing.T, pool *netlifyruntime.Pool, method, path, cookie, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var bodyReader *strings.Reader
 	if body != "" {
@@ -53,7 +52,7 @@ func do(t *testing.T, pool *Pool, method, path, cookie, body string) *httptest.R
 		req.Header.Set("Content-Type", "application/json")
 	}
 	w := httptest.NewRecorder()
-	HandleSSR(pool, w, req)
+	netlifyruntime.HandleSSR(pool, w, req)
 	return w
 }
 
@@ -84,7 +83,6 @@ func TestProductDetail(t *testing.T) {
 func TestProductNotFound(t *testing.T) {
 	pool := loadPool(t, 2)
 	w := do(t, pool, "GET", "/products/99", "", "")
-	// Astro.redirect('/') → 302 or the final 200 after redirect
 	if w.Code != 302 && w.Code != 301 && w.Code != 200 {
 		t.Fatalf("status %d, want redirect or 200", w.Code)
 	}
@@ -143,7 +141,6 @@ func TestCartSession(t *testing.T) {
 	pool := loadPool(t, 1)
 	cookie := "user-id=integtest999"
 
-	// Add item
 	w := do(t, pool, "POST", "/api/cart", cookie, `{"id":1,"name":"Cereal"}`)
 	if w.Code != 200 {
 		t.Fatalf("add to cart: status %d — body: %.200s", w.Code, w.Body.String())
@@ -152,7 +149,6 @@ func TestCartSession(t *testing.T) {
 		t.Errorf("add to cart: expected 'ok'; got: %.200s", w.Body.String())
 	}
 
-	// Read cart API
 	w = do(t, pool, "GET", "/api/cart", cookie, "")
 	if w.Code != 200 {
 		t.Fatalf("get cart: status %d", w.Code)
@@ -161,7 +157,6 @@ func TestCartSession(t *testing.T) {
 		t.Errorf("cart API missing 'Cereal'; got: %.200s", w.Body.String())
 	}
 
-	// Read cart page
 	w = do(t, pool, "GET", "/cart", cookie, "")
 	if w.Code != 200 {
 		t.Fatalf("cart page: status %d", w.Code)
@@ -174,8 +169,7 @@ func TestCartSession(t *testing.T) {
 // ── Polyfill unit tests ───────────────────────────────────────────────────────
 
 // minimalPool creates a pool with a minimal CJS bundle for polyfill testing.
-// The bundle returns a handler that echoes a JS expression result as JSON.
-func minimalPool(t *testing.T, size int) *Pool {
+func minimalPool(t *testing.T, size int) *netlifyruntime.Pool {
 	t.Helper()
 	bundle := []byte(`
 module.exports.default = function(config) {
@@ -206,14 +200,14 @@ module.exports.default = function(config) {
     };
 };
 `)
-	pool, err := NewPool(bundle, map[string]string{}, size)
+	pool, err := netlifyruntime.NewPool(bundle, map[string]string{}, size)
 	if err != nil {
 		t.Fatalf("minimalPool NewPool: %v", err)
 	}
 	return pool
 }
 
-func evalExpr(t *testing.T, pool *Pool, expr string) map[string]interface{} {
+func evalExpr(t *testing.T, pool *netlifyruntime.Pool, expr string) map[string]interface{} {
 	t.Helper()
 	path := "/test?expr=" + encodeURIComponent(expr)
 	w := do(t, pool, "GET", path, "", "")
@@ -248,25 +242,21 @@ func encodeURIComponent(s string) string {
 func TestTextEncoderDecoder(t *testing.T) {
 	pool := minimalPool(t, 1)
 
-	// encode returns Uint8Array
 	r := evalExpr(t, pool, `(function() { var e = new TextEncoder(); var u = e.encode("hello"); return u.byteLength; })()`)
 	if r["result"] != float64(5) {
 		t.Errorf("TextEncoder encode byteLength: got %v, want 5", r["result"])
 	}
 
-	// encode multi-byte (Chinese character "中" = 3 bytes in UTF-8)
 	r = evalExpr(t, pool, `(function() { var e = new TextEncoder(); return e.encode("中").byteLength; })()`)
 	if r["result"] != float64(3) {
 		t.Errorf("TextEncoder encode Chinese char: got %v, want 3", r["result"])
 	}
 
-	// decode round-trip
 	r = evalExpr(t, pool, `(function() { var e = new TextEncoder(); var d = new TextDecoder(); return d.decode(e.encode("hello world")); })()`)
 	if r["result"] != "hello world" {
 		t.Errorf("TextDecoder round-trip: got %v, want 'hello world'", r["result"])
 	}
 
-	// decode multi-byte round-trip
 	r = evalExpr(t, pool, `(function() { var e = new TextEncoder(); var d = new TextDecoder(); return d.decode(e.encode("中文")); })()`)
 	if r["result"] != "中文" {
 		t.Errorf("TextDecoder multi-byte round-trip: got %v, want '中文'", r["result"])
@@ -276,7 +266,6 @@ func TestTextEncoderDecoder(t *testing.T) {
 func TestHeadersSetCookie(t *testing.T) {
 	pool := minimalPool(t, 1)
 
-	// Multiple Set-Cookie headers should be stored separately
 	r := evalExpr(t, pool, `(function() {
 		var h = new Headers();
 		h.append('set-cookie', 'a=1; Path=/');
@@ -287,7 +276,6 @@ func TestHeadersSetCookie(t *testing.T) {
 		t.Errorf("getSetCookie count: got %v, want 2", r["result"])
 	}
 
-	// Cookie with comma in value should not be split
 	r = evalExpr(t, pool, `(function() {
 		var h = new Headers();
 		h.append('set-cookie', 'data=foo,bar; Path=/');
@@ -302,19 +290,16 @@ func TestHeadersSetCookie(t *testing.T) {
 func TestAtobBtoa(t *testing.T) {
 	pool := minimalPool(t, 1)
 
-	// btoa round-trip
 	r := evalExpr(t, pool, `btoa('hello world')`)
 	if r["result"] != "aGVsbG8gd29ybGQ=" {
 		t.Errorf("btoa: got %v, want 'aGVsbG8gd29ybGQ='", r["result"])
 	}
 
-	// atob round-trip
 	r = evalExpr(t, pool, `atob('aGVsbG8gd29ybGQ=')`)
 	if r["result"] != "hello world" {
 		t.Errorf("atob: got %v, want 'hello world'", r["result"])
 	}
 
-	// round-trip
 	r = evalExpr(t, pool, `atob(btoa('test data 123'))`)
 	if r["result"] != "test data 123" {
 		t.Errorf("atob(btoa) round-trip: got %v", r["result"])
@@ -324,25 +309,21 @@ func TestAtobBtoa(t *testing.T) {
 func TestURLParsing(t *testing.T) {
 	pool := minimalPool(t, 1)
 
-	// Absolute URL
 	r := evalExpr(t, pool, `(function() { var u = new URL('http://example.com/path?q=1#hash'); return [u.hostname, u.pathname, u.search, u.hash].join('|'); })()`)
 	if r["result"] != "example.com|/path|?q=1|#hash" {
 		t.Errorf("URL absolute: got %v", r["result"])
 	}
 
-	// Relative URL with base
 	r = evalExpr(t, pool, `(function() { var u = new URL('/other', 'http://base.com/path'); return u.href; })()`)
 	if r["result"] != "http://base.com/other" {
 		t.Errorf("URL relative: got %v, want 'http://base.com/other'", r["result"])
 	}
 
-	// URL.canParse
 	r = evalExpr(t, pool, `URL.canParse('http://valid.com')`)
 	if r["result"] != true {
 		t.Errorf("URL.canParse valid: got %v, want true", r["result"])
 	}
 
-	// IPv6: host includes brackets, hostname strips them (WHATWG spec)
 	r = evalExpr(t, pool, `(function() { var u = new URL('http://[::1]:8080/'); return u.host; })()`)
 	if r["result"] != "[::1]:8080" {
 		t.Errorf("URL IPv6 host: got %v, want '[::1]:8080'", r["result"])
@@ -356,7 +337,6 @@ func TestCryptoRandomUUID(t *testing.T) {
 	if !ok || len(uuid) != 36 {
 		t.Errorf("randomUUID: got %v (len %d), want 36-char UUID", r["result"], len(uuid))
 	}
-	// UUID format: 8-4-4-4-12
 	parts := strings.Split(uuid, "-")
 	if len(parts) != 5 {
 		t.Errorf("randomUUID: expected 5 dash-separated groups, got %v", uuid)
@@ -366,7 +346,6 @@ func TestCryptoRandomUUID(t *testing.T) {
 func TestCryptoSubtleDigest(t *testing.T) {
 	pool := minimalPool(t, 1)
 
-	// SHA-256 of "abc" = ba7816bf8f01cfea414140de5dae2ec73b00361bbef0469348423f656c66a39a (hex) = base64 of those bytes
 	r := evalExpr(t, pool, `(async function() {
 		var data = new TextEncoder().encode('abc');
 		var hash = await crypto.subtle.digest('SHA-256', data);
@@ -376,7 +355,6 @@ func TestCryptoSubtleDigest(t *testing.T) {
 		t.Errorf("SHA-256 digest byteLength: got %v, want 32", r["result"])
 	}
 
-	// SHA-512 produces 64 bytes
 	r = evalExpr(t, pool, `(async function() {
 		var hash = await crypto.subtle.digest('SHA-512', new TextEncoder().encode('hello'));
 		return hash.byteLength;
@@ -389,7 +367,6 @@ func TestCryptoSubtleDigest(t *testing.T) {
 func TestCryptoSubtleHMAC(t *testing.T) {
 	pool := minimalPool(t, 1)
 
-	// Generate key, sign, verify
 	r := evalExpr(t, pool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'HMAC', hash:'SHA-256'}, true, ['sign','verify']);
 		var data = new TextEncoder().encode('hello world');
@@ -402,7 +379,6 @@ func TestCryptoSubtleHMAC(t *testing.T) {
 		t.Errorf("HMAC sign/verify: got %v, want true", r["result"])
 	}
 
-	// HMAC signature is 32 bytes for SHA-256
 	r = evalExpr(t, pool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'HMAC', hash:'SHA-256'}, false, ['sign']);
 		var sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode('test'));
@@ -412,7 +388,6 @@ func TestCryptoSubtleHMAC(t *testing.T) {
 		t.Errorf("HMAC SHA-256 sig byteLength: got %v, want 32", r["result"])
 	}
 
-	// importKey raw → sign → verify
 	r = evalExpr(t, pool, `(async function() {
 		var rawKey = new Uint8Array(32);
 		crypto.getRandomValues(rawKey);
@@ -424,7 +399,6 @@ func TestCryptoSubtleHMAC(t *testing.T) {
 		t.Errorf("HMAC importKey+sign+verify: got %v", r["result"])
 	}
 
-	// exportKey raw returns same bytes
 	r = evalExpr(t, pool, `(async function() {
 		var raw = new Uint8Array([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]);
 		var key = await crypto.subtle.importKey('raw', raw, {name:'HMAC', hash:'SHA-256'}, true, ['sign']);
@@ -440,7 +414,6 @@ func TestCryptoSubtleHMAC(t *testing.T) {
 func TestCryptoSubtleAESGCM(t *testing.T) {
 	pool := minimalPool(t, 1)
 
-	// Generate key, encrypt, decrypt round-trip
 	r := evalExpr(t, pool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'AES-GCM', length:256}, true, ['encrypt','decrypt']);
 		var iv = crypto.getRandomValues(new Uint8Array(12));
@@ -453,7 +426,6 @@ func TestCryptoSubtleAESGCM(t *testing.T) {
 		t.Errorf("AES-GCM round-trip: got %v, want 'secret message'", r["result"])
 	}
 
-	// AES-128
 	r = evalExpr(t, pool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'AES-GCM', length:128}, false, ['encrypt','decrypt']);
 		var iv = new Uint8Array(12);
@@ -469,7 +441,6 @@ func TestCryptoSubtleAESGCM(t *testing.T) {
 func TestCryptoSubtleExportImportJWK(t *testing.T) {
 	pool := minimalPool(t, 1)
 
-	// Export HMAC key as JWK and re-import it, verify it still works
 	r := evalExpr(t, pool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'HMAC', hash:'SHA-256'}, true, ['sign','verify']);
 		var jwk = await crypto.subtle.exportKey('jwk', key);
@@ -486,11 +457,9 @@ func TestCryptoSubtleExportImportJWK(t *testing.T) {
 func TestGetRandomValues(t *testing.T) {
 	pool := minimalPool(t, 1)
 
-	// getRandomValues fills a typed array
 	r := evalExpr(t, pool, `(function() {
 		var arr = new Uint8Array(16);
 		crypto.getRandomValues(arr);
-		// Very unlikely all zeros
 		var sum = 0;
 		for (var i = 0; i < arr.length; i++) sum += arr[i];
 		return sum > 0;
@@ -500,13 +469,10 @@ func TestGetRandomValues(t *testing.T) {
 	}
 }
 
-// TestPolyfillsQJSInit verifies that all polyfills evaluate without error.
-// The pool initialization itself is the test — NewPool returns an error if any polyfill fails.
 func TestPolyfillsQJSInit(t *testing.T) {
 	bundle := []byte(`module.exports.default = function() { return async function(req) { return new Response('ok'); }; };`)
-	_, err := NewPool(bundle, map[string]string{}, 2)
+	_, err := netlifyruntime.NewPool(bundle, map[string]string{}, 2)
 	if err != nil {
 		t.Fatalf("pool init failed (polyfill error): %v", err)
 	}
 }
-
