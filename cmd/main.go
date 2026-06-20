@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	netlifyruntime "netlify-runtime"
+	netlifyruntime "github.com/dxkite/astro-runtime"
 )
 
 func main() {

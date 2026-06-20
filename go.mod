@@ -1,4 +1,4 @@
-module netlify-runtime
+module github.com/dxkite/astro-runtime
 
 go 1.22.0
 

@@ -1,4 +1,4 @@
-# netlify-runtime 文档索引
+# astro-runtime 文档索引
 
 本地运行 `@astrojs/netlify` SSR 函数的 Go + QuickJS 运行时。
 

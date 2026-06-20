@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	netlifyruntime "netlify-runtime"
+	netlifyruntime "github.com/dxkite/astro-runtime"
 )
 
 // loadPool loads the pre-bundled testapp-ssr CJS from testdata.
