@@ -8,7 +8,7 @@ globalThis.fetch = async function fetch(input, init) {
     h.forEach(function(v, k) { reqHeaders[k] = v; });
   }
   var body = init.body || null;
-  var resultJSON = await __goFetchRaw(url, method, JSON.stringify(reqHeaders), body);
+  var resultJSON = await __go_fetchRaw(url, method, JSON.stringify(reqHeaders), body);
   var result = JSON.parse(resultJSON);
   return new Response(result.body, {
     status: result.status,

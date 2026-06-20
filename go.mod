@@ -3,8 +3,8 @@ module github.com/dxkite/astro-runtime
 go 1.22.0
 
 require (
+	github.com/dxkite/qjs v0.0.0-20260621013206-c1dcd337bac8
 	github.com/evanw/esbuild v0.25.0
-	github.com/fastschema/qjs v0.0.6
 )
 
 require (

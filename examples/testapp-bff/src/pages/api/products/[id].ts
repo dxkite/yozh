@@ -14,18 +14,21 @@ export const GET: APIRoute = async ({ params, locals }) => {
 
   const id = params.id;
 
-  // NOTE: astro-runtime 的 fetch() 通过 Go goroutine 实现异步；
-  // wazero WASM 模块单线程，Promise.allSettled 产生的并发回调会竞争。
-  // 使用顺序 await，各服务依次调用，降级用 try/catch 包裹。
-  let product: Product | null = null;
-  let inventory: Inventory | null = null;
-  let reviews: Reviews | null = null;
+  // 三个上游请求并发执行：goroutine 各自完成 HTTP 后通过 channel 回调，
+  // QJS 事件循环依次 resolve Promise，总耗时 ≈ 最慢单个请求（而非三者之和）。
+  const [productResult, inventoryResult, reviewsResult] = await Promise.allSettled([
+    upstreamGet<Product>(`${CATALOG}/products/${id}`),
+    upstreamGet<Inventory>(`${INVENTORY}/stock/${id}`),
+    upstreamGet<Reviews>(`${REVIEW}/reviews/${id}`),
+  ]);
 
-  try { product   = await upstreamGet<Product>(`${CATALOG}/products/${id}`);   } catch {}
-  try { inventory = await upstreamGet<Inventory>(`${INVENTORY}/stock/${id}`);  } catch {}
-  try { reviews   = await upstreamGet<Reviews>(`${REVIEW}/reviews/${id}`);     } catch {}
+  if (productResult.status === 'rejected') {
+    return Response.json({ error: 'not found' }, { status: 404 });
+  }
 
-  if (!product) return Response.json({ error: 'not found' }, { status: 404 });
-
-  return Response.json({ product, inventory, reviews });
+  return Response.json({
+    product:   productResult.value,
+    inventory: inventoryResult.status === 'fulfilled' ? inventoryResult.value : null,
+    reviews:   reviewsResult.status   === 'fulfilled' ? reviewsResult.value   : null,
+  });
 };

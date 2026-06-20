@@ -1,6 +1,7 @@
-package netlifyruntime
+package astroruntime
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -14,7 +15,7 @@ import (
 	"hash"
 	"strings"
 
-	"github.com/fastschema/qjs"
+	"github.com/dxkite/qjs"
 )
 
 type algoSpec struct {
@@ -59,18 +60,17 @@ func makeHasher(hashName string) (func() hash.Hash, error) {
 }
 
 func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
-	errVal := func(msg string) (*qjs.Value, error) {
-		return ctx.NewString("ERROR:" + msg), nil
+	errVal := func(msg string) (any, error) {
+		return "ERROR:" + msg, nil
 	}
 
-	// __cryptoSubtleDigest(algo, dataB64) → resultB64
-	ctx.SetFunc("__cryptoSubtleDigest", func(this *qjs.This) (*qjs.Value, error) {
-		args := this.Args()
+	// __go_cryptoSubtleDigest(algo, dataB64) → resultB64
+	ctx.SetGoFunc("__go_cryptoSubtleDigest", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 2 {
 			return errVal("missing arguments")
 		}
-		algo := strings.ToUpper(args[0].String())
-		data, err := base64.StdEncoding.DecodeString(args[1].String())
+		algo := strings.ToUpper(args[0].(string))
+		data, err := base64.StdEncoding.DecodeString(args[1].(string))
 		if err != nil {
 			return errVal("invalid base64: " + err.Error())
 		}
@@ -91,24 +91,23 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		default:
 			return errVal("unsupported digest algorithm: " + algo)
 		}
-		return ctx.NewString(base64.StdEncoding.EncodeToString(h)), nil
+		return base64.StdEncoding.EncodeToString(h), nil
 	})
 
-	// __cryptoSubtleImportKey(format, dataB64orJWK, algoJSON, extractable, usagesJSON) → keyId
-	ctx.SetFunc("__cryptoSubtleImportKey", func(this *qjs.This) (*qjs.Value, error) {
-		args := this.Args()
+	// __go_cryptoSubtleImportKey(format, dataB64orJWK, algoJSON, extractable, usagesJSON) → keyId
+	ctx.SetGoFunc("__go_cryptoSubtleImportKey", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 5 {
 			return errVal("missing arguments")
 		}
-		format := args[0].String()
-		rawData := args[1].String()
+		format, _ := args[0].(string)
+		rawData, _ := args[1].(string)
 		var algo algoSpec
-		if err := json.Unmarshal([]byte(args[2].String()), &algo); err != nil {
+		if err := json.Unmarshal([]byte(args[2].(string)), &algo); err != nil {
 			return errVal("invalid algorithm JSON: " + err.Error())
 		}
-		extractable := args[3].String() == "true"
+		extractable := args[3].(string) == "true"
 		var usages []string
-		if err := json.Unmarshal([]byte(args[4].String()), &usages); err != nil {
+		if err := json.Unmarshal([]byte(args[4].(string)), &usages); err != nil {
 			return errVal("invalid usages JSON: " + err.Error())
 		}
 
@@ -150,22 +149,21 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			Extractable: extractable,
 			Usages:      usages,
 		}
-		return ctx.NewString(id), nil
+		return id, nil
 	})
 
-	// __cryptoSubtleGenerateKey(algoJSON, extractable, usagesJSON) → keyId
-	ctx.SetFunc("__cryptoSubtleGenerateKey", func(this *qjs.This) (*qjs.Value, error) {
-		args := this.Args()
+	// __go_cryptoSubtleGenerateKey(algoJSON, extractable, usagesJSON) → keyId
+	ctx.SetGoFunc("__go_cryptoSubtleGenerateKey", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 3 {
 			return errVal("missing arguments")
 		}
 		var algo algoSpec
-		if err := json.Unmarshal([]byte(args[0].String()), &algo); err != nil {
+		if err := json.Unmarshal([]byte(args[0].(string)), &algo); err != nil {
 			return errVal("invalid algorithm JSON: " + err.Error())
 		}
-		extractable := args[1].String() == "true"
+		extractable := args[1].(string) == "true"
 		var usages []string
-		if err := json.Unmarshal([]byte(args[2].String()), &usages); err != nil {
+		if err := json.Unmarshal([]byte(args[2].(string)), &usages); err != nil {
 			return errVal("invalid usages JSON: " + err.Error())
 		}
 
@@ -179,7 +177,7 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			case "SHA-512":
 				keyLen = 64
 			default:
-				keyLen = 32 // SHA-256
+				keyLen = 32
 			}
 			if algo.Length > 0 {
 				keyLen = algo.Length / 8
@@ -191,7 +189,7 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			case 192:
 				keyLen = 24
 			default:
-				keyLen = 32 // 256-bit
+				keyLen = 32
 			}
 		default:
 			return errVal("unsupported generateKey algorithm: " + algo.Name)
@@ -213,17 +211,16 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			Extractable: extractable,
 			Usages:      usages,
 		}
-		return ctx.NewString(id), nil
+		return id, nil
 	})
 
-	// __cryptoSubtleExportKey(format, keyId) → base64 or JWK JSON string
-	ctx.SetFunc("__cryptoSubtleExportKey", func(this *qjs.This) (*qjs.Value, error) {
-		args := this.Args()
+	// __go_cryptoSubtleExportKey(format, keyId) → base64 or JWK JSON string
+	ctx.SetGoFunc("__go_cryptoSubtleExportKey", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 2 {
 			return errVal("missing arguments")
 		}
-		format := args[0].String()
-		keyID := args[1].String()
+		format, _ := args[0].(string)
+		keyID, _ := args[1].(string)
 		ck, ok := keyReg[keyID]
 		if !ok {
 			return errVal("key not found: " + keyID)
@@ -234,7 +231,7 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 
 		switch format {
 		case "raw":
-			return ctx.NewString(base64.StdEncoding.EncodeToString(ck.Raw)), nil
+			return base64.StdEncoding.EncodeToString(ck.Raw), nil
 		case "jwk":
 			jwk := map[string]interface{}{
 				"kty":     "oct",
@@ -268,20 +265,19 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 				}
 			}
 			j, _ := json.Marshal(jwk)
-			return ctx.NewString(string(j)), nil
+			return string(j), nil
 		default:
 			return errVal("unsupported export format: " + format)
 		}
 	})
 
-	// __cryptoSubtleSign(algoJSON, keyId, dataB64) → sigB64
-	ctx.SetFunc("__cryptoSubtleSign", func(this *qjs.This) (*qjs.Value, error) {
-		args := this.Args()
+	// __go_cryptoSubtleSign(algoJSON, keyId, dataB64) → sigB64
+	ctx.SetGoFunc("__go_cryptoSubtleSign", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 3 {
 			return errVal("missing arguments")
 		}
-		keyID := args[1].String()
-		data, err := base64.StdEncoding.DecodeString(args[2].String())
+		keyID, _ := args[1].(string)
+		data, err := base64.StdEncoding.DecodeString(args[2].(string))
 		if err != nil {
 			return errVal("invalid data base64: " + err.Error())
 		}
@@ -303,28 +299,27 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			}
 			mac := hmac.New(newH, ck.Raw)
 			mac.Write(data)
-			return ctx.NewString(base64.StdEncoding.EncodeToString(mac.Sum(nil))), nil
+			return base64.StdEncoding.EncodeToString(mac.Sum(nil)), nil
 		default:
 			return errVal("unsupported sign algorithm: " + ck.Algo.Name)
 		}
 	})
 
-	// __cryptoSubtleVerify(algoJSON, keyId, sigB64, dataB64) → "true"/"false"
-	ctx.SetFunc("__cryptoSubtleVerify", func(this *qjs.This) (*qjs.Value, error) {
-		args := this.Args()
+	// __go_cryptoSubtleVerify(algoJSON, keyId, sigB64, dataB64) → "true"/"false"
+	ctx.SetGoFunc("__go_cryptoSubtleVerify", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 4 {
-			return ctx.NewString("false"), nil
+			return "false", nil
 		}
-		keyID := args[1].String()
-		sig, err1 := base64.StdEncoding.DecodeString(args[2].String())
-		data, err2 := base64.StdEncoding.DecodeString(args[3].String())
+		keyID, _ := args[1].(string)
+		sig, err1 := base64.StdEncoding.DecodeString(args[2].(string))
+		data, err2 := base64.StdEncoding.DecodeString(args[3].(string))
 		if err1 != nil || err2 != nil {
-			return ctx.NewString("false"), nil
+			return "false", nil
 		}
 
 		ck, ok := keyReg[keyID]
 		if !ok {
-			return ctx.NewString("false"), nil
+			return "false", nil
 		}
 
 		switch strings.ToUpper(ck.Algo.Name) {
@@ -335,32 +330,31 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			}
 			newH, err := makeHasher(hashName)
 			if err != nil {
-				return ctx.NewString("false"), nil
+				return "false", nil
 			}
 			mac := hmac.New(newH, ck.Raw)
 			mac.Write(data)
 			if hmac.Equal(sig, mac.Sum(nil)) {
-				return ctx.NewString("true"), nil
+				return "true", nil
 			}
-			return ctx.NewString("false"), nil
+			return "false", nil
 		default:
-			return ctx.NewString("false"), nil
+			return "false", nil
 		}
 	})
 
-	// __cryptoSubtleEncrypt(algoJSON, keyId, plaintextB64) → ciphertextB64
+	// __go_cryptoSubtleEncrypt(algoJSON, keyId, plaintextB64) → ciphertextB64
 	// algoJSON.iv is base64-encoded (converted by _algoToJSON in JS)
-	ctx.SetFunc("__cryptoSubtleEncrypt", func(this *qjs.This) (*qjs.Value, error) {
-		args := this.Args()
+	ctx.SetGoFunc("__go_cryptoSubtleEncrypt", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 3 {
 			return errVal("missing arguments")
 		}
 		var algo algoSpec
-		if err := json.Unmarshal([]byte(args[0].String()), &algo); err != nil {
+		if err := json.Unmarshal([]byte(args[0].(string)), &algo); err != nil {
 			return errVal("invalid algorithm JSON: " + err.Error())
 		}
-		keyID := args[1].String()
-		plaintext, err := base64.StdEncoding.DecodeString(args[2].String())
+		keyID, _ := args[1].(string)
+		plaintext, err := base64.StdEncoding.DecodeString(args[2].(string))
 		if err != nil {
 			return errVal("invalid data base64: " + err.Error())
 		}
@@ -388,7 +382,7 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 				return errVal(fmt.Sprintf("AES-GCM: IV must be %d bytes, got %d", gcm.NonceSize(), len(iv)))
 			}
 			ciphertext := gcm.Seal(nil, iv, plaintext, nil)
-			return ctx.NewString(base64.StdEncoding.EncodeToString(ciphertext)), nil
+			return base64.StdEncoding.EncodeToString(ciphertext), nil
 		case "AES-CBC":
 			iv, err := base64.StdEncoding.DecodeString(algo.IV)
 			if err != nil {
@@ -405,24 +399,23 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			mode := cipher.NewCBCEncrypter(block, iv)
 			ciphertext := make([]byte, len(padded))
 			mode.CryptBlocks(ciphertext, padded)
-			return ctx.NewString(base64.StdEncoding.EncodeToString(ciphertext)), nil
+			return base64.StdEncoding.EncodeToString(ciphertext), nil
 		default:
 			return errVal("unsupported encrypt algorithm: " + ck.Algo.Name)
 		}
 	})
 
-	// __cryptoSubtleDecrypt(algoJSON, keyId, ciphertextB64) → plaintextB64
-	ctx.SetFunc("__cryptoSubtleDecrypt", func(this *qjs.This) (*qjs.Value, error) {
-		args := this.Args()
+	// __go_cryptoSubtleDecrypt(algoJSON, keyId, ciphertextB64) → plaintextB64
+	ctx.SetGoFunc("__go_cryptoSubtleDecrypt", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 3 {
 			return errVal("missing arguments")
 		}
 		var algo algoSpec
-		if err := json.Unmarshal([]byte(args[0].String()), &algo); err != nil {
+		if err := json.Unmarshal([]byte(args[0].(string)), &algo); err != nil {
 			return errVal("invalid algorithm JSON: " + err.Error())
 		}
-		keyID := args[1].String()
-		ciphertext, err := base64.StdEncoding.DecodeString(args[2].String())
+		keyID, _ := args[1].(string)
+		ciphertext, err := base64.StdEncoding.DecodeString(args[2].(string))
 		if err != nil {
 			return errVal("invalid data base64: " + err.Error())
 		}
@@ -453,7 +446,7 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			if err != nil {
 				return errVal("AES-GCM decrypt failed: " + err.Error())
 			}
-			return ctx.NewString(base64.StdEncoding.EncodeToString(plaintext)), nil
+			return base64.StdEncoding.EncodeToString(plaintext), nil
 		case "AES-CBC":
 			iv, err := base64.StdEncoding.DecodeString(algo.IV)
 			if err != nil {
@@ -475,14 +468,14 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			if err != nil {
 				return errVal("AES-CBC unpad: " + err.Error())
 			}
-			return ctx.NewString(base64.StdEncoding.EncodeToString(unpadded)), nil
+			return base64.StdEncoding.EncodeToString(unpadded), nil
 		default:
 			return errVal("unsupported decrypt algorithm: " + ck.Algo.Name)
 		}
 	})
 
-	// __cryptoSubtleDeriveBits — P1, not yet implemented
-	ctx.SetFunc("__cryptoSubtleDeriveBits", func(this *qjs.This) (*qjs.Value, error) {
+	// __go_cryptoSubtleDeriveBits — P1, not yet implemented
+	ctx.SetGoFunc("__go_cryptoSubtleDeriveBits", func(_ context.Context, args ...any) (any, error) {
 		return errVal("deriveBits not yet implemented (P1 feature)")
 	})
 }

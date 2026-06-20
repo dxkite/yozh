@@ -345,7 +345,68 @@ Go HTTP Response → 浏览器
 | 约束 | 说明 |
 |---|---|
 | **无原生 Node 模块** | `fs`、`child_process` 不可用；文件操作需通过上游 HTTP 服务 |
-| **fetch 超时 30 秒** | 上游服务应有独立超时控制，`Promise.allSettled` 避免单服务超时阻塞全页 |
+| **fetch 超时 30 秒** | 上游服务应有独立超时控制，避免单服务超时阻塞全页 |
 | **无共享内存** | 多个 QJS runtime 实例不共享内存，跨请求的共享状态（计数、缓存）需外部存储（Redis、DB） |
 | **CPU 密集任务** | 大量 JSON 处理、加解密建议移到 Go 层；QJS 单线程，长时间占用会阻塞同一 runtime 的其他请求 |
-| **fetch 顺序调用** | `fetch()` 通过 Go goroutine 实现异步；底层 wazero WASM 模块单线程，`Promise.allSettled([fetch(), fetch(), ...])` 产生的并发回调会竞争导致 panic。**务必使用顺序 `await` 链，配合 `try/catch` 实现降级**（见上方 `[id].ts` 示例） |
+| **fetch 不支持原生并发** | 见下方说明 |
+
+---
+
+## fetch 并发限制说明
+
+### 根本原因
+
+astro-runtime 使用 [wazero](https://wazero.io/) 将 QuickJS 编译为 WASM 运行。wazero 的 WASM 实例**不是线程安全的** — 所有对实例的调用必须来自同一 goroutine。
+
+`fetch()` 的实现方式是 `SetFunc`（同步阻塞）：QJS goroutine 调用 Go HTTP client，等待响应后返回。这是安全的，因为始终只有一个 goroutine 接触 WASM 实例。
+
+### 为什么 `Promise.allSettled([fetch(), fetch()])` 不能并发
+
+```typescript
+// ❌ 看起来是并发，实际是顺序执行
+const [r1, r2, r3] = await Promise.allSettled([
+  fetch(catalogURL),    // fetch() 同步阻塞，HTTP 请求立即完成
+  fetch(inventoryURL),  // 等第一个完成才开始
+  fetch(reviewURL),     // 等第二个完成才开始
+]);
+```
+
+`fetch()` 调用 `__goFetchRaw`（同步），HTTP 请求在 QJS event loop 的同一 tick 内完成并返回已 resolved 的 Promise。`Promise.allSettled` 拿到的是三个已经完成的 Promise，没有并发执行的机会。
+
+如果改用 `SetAsyncFunc`（异步回调），子 goroutine 会在 HTTP 完成后**回调进 WASM**，与持有 WASM 实例的主 goroutine 竞争，导致 "invalid table access" / "out of bounds memory access" panic。
+
+### 当前推荐：顺序 await + try/catch 降级
+
+```typescript
+// ✅ 顺序调用，任一失败不阻断其他
+let product: Product | null = null;
+let inventory: Inventory | null = null;
+let reviews: Reviews | null = null;
+
+try { product   = await upstreamGet<Product>(`${CATALOG}/products/${id}`);   } catch {}
+try { inventory = await upstreamGet<Inventory>(`${INVENTORY}/stock/${id}`);  } catch {}
+try { reviews   = await upstreamGet<Reviews>(`${REVIEW}/reviews/${id}`);     } catch {}
+```
+
+性能影响：三个串行请求总耗时 = 各服务延迟之和。对于 P99 < 50ms 的内部服务，总计 < 150ms，通常可以接受。
+
+### 未来方案
+
+真正支持并发 await 有两条路：
+
+**方案 A：批量宿主函数**（API 稍变，不改库）
+
+在 Go 层新增 `__goFetchAll(specsJSON)`：内部用 `sync.WaitGroup` + goroutine 并发发请求，子 goroutine 只做 HTTP（不接触 WASM），主 goroutine 阻塞等待后一次性返回所有结果。
+
+```typescript
+// JS polyfill: fetchAll([[url, init?], ...]) → PromiseSettledResult<Response>[]
+const [r1, r2, r3] = await fetchAll([
+  [catalogURL],
+  [inventoryURL],
+  [reviewURL],
+]);
+```
+
+**方案 B：改造 qjs 事件循环**（原生兼容，改库）
+
+子 goroutine 不直接回调 QJS，而是把结果写入 channel；QJS goroutine 在 `JS_ExecutePendingJob` 间隙消费 channel 并 resolve promise。所有 WASM 调用仍在同一 goroutine，安全。这与 Node.js 的 libuv 事件循环模型一致，但需要 fork `fastschema/qjs` 实现。

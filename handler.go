@@ -1,4 +1,4 @@
-package netlifyruntime
+package astroruntime
 
 import (
 	"encoding/json"
@@ -6,7 +6,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/fastschema/qjs"
+	"github.com/dxkite/qjs"
 )
 
 // requestPayload is the JSON shape passed to the JS __handleRequest function.

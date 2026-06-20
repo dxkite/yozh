@@ -4,7 +4,7 @@
     globalThis.TextEncoder = class TextEncoder {
       get encoding() { return 'utf-8'; }
       encode(str) {
-        var buf = __textEncodeUTF8(String(str || ''));
+        var buf = __go_textEncodeUTF8(String(str || ''));
         return new Uint8Array(buf);
       }
       encodeInto(str, dest) {
@@ -21,8 +21,8 @@
         for (var i = 0; i < boundary; i++) dest[i] = encoded[i];
         // Decode the written bytes to count how many JS chars (UTF-16 code units) were consumed.
         var written = boundary;
-        var b64 = __bufToB64(JSON.stringify(Array.prototype.slice.call(encoded, 0, boundary)));
-        var decoded = __textDecodeUTF8(b64);
+        var b64 = __go_bufToB64(JSON.stringify(Array.prototype.slice.call(encoded, 0, boundary)));
+        var decoded = __go_textDecodeUTF8(b64);
         return { read: decoded.length, written: written };
       }
     };
@@ -41,8 +41,8 @@
           bytes = new Uint8Array(buf);
         }
         if (bytes.length === 0) return '';
-        var b64 = __bufToB64(JSON.stringify(Array.prototype.slice.call(bytes)));
-        return __textDecodeUTF8(b64);
+        var b64 = __go_bufToB64(JSON.stringify(Array.prototype.slice.call(bytes)));
+        return __go_textDecodeUTF8(b64);
       }
     };
   }
@@ -173,7 +173,7 @@
           }
         }
         if (allBytes.length === 0) return '';
-        return __textDecodeUTF8(__bufToB64(JSON.stringify(allBytes)));
+        return __go_textDecodeUTF8(__go_bufToB64(JSON.stringify(allBytes)));
       }
       // AsyncIterable bodies (Astro renderToAsyncIterable, used when isNode=true)
       // Collect all raw bytes then decode once to avoid partial multi-byte sequences.
@@ -189,7 +189,7 @@
           }
         }
         if (allBytes2.length === 0) return '';
-        return __textDecodeUTF8(__bufToB64(JSON.stringify(allBytes2)));
+        return __go_textDecodeUTF8(__go_bufToB64(JSON.stringify(allBytes2)));
       }
       return String(b);
     }

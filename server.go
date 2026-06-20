@@ -1,4 +1,4 @@
-package netlifyruntime
+package astroruntime
 
 import (
 	"net/http"

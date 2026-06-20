@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	netlifyruntime "github.com/dxkite/astro-runtime"
+	astroruntime "github.com/dxkite/astro-runtime"
 )
 
 func main() {
@@ -31,7 +31,7 @@ func main() {
 	}
 
 	log.Printf("Bundling %s ...", absSSR)
-	bundleCode, err := netlifyruntime.BundleSSR(absSSR)
+	bundleCode, err := astroruntime.BundleSSR(absSSR)
 	if err != nil {
 		log.Fatalf("bundle: %v", err)
 	}
@@ -46,7 +46,7 @@ func main() {
 	}
 
 	log.Printf("Initializing QJS pool (%d runtimes) ...", poolSize)
-	pool, err := netlifyruntime.NewPool(bundleCode, envMap(), poolSize)
+	pool, err := astroruntime.NewPool(bundleCode, envMap(), poolSize)
 	if err != nil {
 		log.Fatalf("pool init: %v", err)
 	}
@@ -58,7 +58,7 @@ func main() {
 	log.Printf("  dist: %s", absDist)
 	log.Printf("  ssr:  %s", absSSR)
 
-	if err := netlifyruntime.StartServer(pool, absDist, addr); err != nil {
+	if err := astroruntime.StartServer(pool, absDist, addr); err != nil {
 		log.Fatal(err)
 	}
 }

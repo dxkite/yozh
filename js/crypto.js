@@ -1,6 +1,6 @@
 (function() {
   // ── Binary transfer helpers ───────────────────────────────────────────────
-  // _toB64: convert Uint8Array / ArrayBuffer -> base64 string (via Go __bufToB64)
+  // _toB64: convert Uint8Array / ArrayBuffer -> base64 string (via Go __go_bufToB64)
   function _toB64(buf) {
     if (!buf) return '';
     var bytes;
@@ -13,10 +13,10 @@
     } else {
       try { bytes = new Uint8Array(buf); } catch(e) { return ''; }
     }
-    return __bufToB64(JSON.stringify(Array.prototype.slice.call(bytes)));
+    return __go_bufToB64(JSON.stringify(Array.prototype.slice.call(bytes)));
   }
-  // _fromB64: decode base64 string -> ArrayBuffer (via Go __b64ToBuf)
-  function _fromB64(b64) { return __b64ToBuf(b64); }
+  // _fromB64: decode base64 string -> ArrayBuffer (via Go __go_b64ToBuf)
+  function _fromB64(b64) { return __go_b64ToBuf(b64); }
 
   // _makeKey: create a JS CryptoKey-like object backed by a Go key registry ID
   function _makeKey(id, type, algorithm, extractable, usages) {
@@ -42,21 +42,21 @@
   var subtle = {
     digest: async function(algorithm, data) {
       var algo = typeof algorithm === 'string' ? algorithm : algorithm.name;
-      var res = __cryptoSubtleDigest(algo, _toB64(data));
+      var res = __go_cryptoSubtleDigest(algo, _toB64(data));
       if (res.slice(0,6) === 'ERROR:') throw new DOMException(res.slice(6), 'OperationError');
       return _fromB64(res);
     },
     importKey: async function(format, keyData, algorithm, extractable, usages) {
       var algoJ = _algoToJSON(algorithm);
       var data = (format === 'jwk') ? JSON.stringify(keyData) : _toB64(keyData);
-      var id = __cryptoSubtleImportKey(format, data, algoJ, String(extractable), JSON.stringify(usages));
+      var id = __go_cryptoSubtleImportKey(format, data, algoJ, String(extractable), JSON.stringify(usages));
       if (id.slice(0,6) === 'ERROR:') throw new DOMException(id.slice(6), 'DataError');
       var algoObj = typeof algorithm === 'string' ? {name: algorithm} : algorithm;
       return _makeKey(id, 'secret', algoObj, extractable, usages);
     },
     generateKey: async function(algorithm, extractable, usages) {
       var algoJ = _algoToJSON(algorithm);
-      var res = __cryptoSubtleGenerateKey(algoJ, String(extractable), JSON.stringify(usages));
+      var res = __go_cryptoSubtleGenerateKey(algoJ, String(extractable), JSON.stringify(usages));
       if (res.slice(0,6) === 'ERROR:') throw new DOMException(res.slice(6), 'OperationError');
       var algoObj = typeof algorithm === 'string' ? {name: algorithm} : algorithm;
       // Asymmetric key pairs return JSON {priv:"id",pub:"id"}; symmetric returns a plain key ID
@@ -72,32 +72,32 @@
       return _makeKey(res, 'secret', algoObj, extractable, usages);
     },
     exportKey: async function(format, key) {
-      var res = __cryptoSubtleExportKey(format, key.__id);
+      var res = __go_cryptoSubtleExportKey(format, key.__id);
       if (res.slice(0,6) === 'ERROR:') throw new DOMException(res.slice(6), 'InvalidAccessError');
       if (format === 'jwk') return JSON.parse(res);
       return _fromB64(res);
     },
     sign: async function(algorithm, key, data) {
-      var res = __cryptoSubtleSign(_algoToJSON(algorithm), key.__id, _toB64(data));
+      var res = __go_cryptoSubtleSign(_algoToJSON(algorithm), key.__id, _toB64(data));
       if (res.slice(0,6) === 'ERROR:') throw new DOMException(res.slice(6), 'OperationError');
       return _fromB64(res);
     },
     verify: async function(algorithm, key, signature, data) {
-      var res = __cryptoSubtleVerify(_algoToJSON(algorithm), key.__id, _toB64(signature), _toB64(data));
+      var res = __go_cryptoSubtleVerify(_algoToJSON(algorithm), key.__id, _toB64(signature), _toB64(data));
       return res === 'true';
     },
     encrypt: async function(algorithm, key, data) {
-      var res = __cryptoSubtleEncrypt(_algoToJSON(algorithm), key.__id, _toB64(data));
+      var res = __go_cryptoSubtleEncrypt(_algoToJSON(algorithm), key.__id, _toB64(data));
       if (res.slice(0,6) === 'ERROR:') throw new DOMException(res.slice(6), 'OperationError');
       return _fromB64(res);
     },
     decrypt: async function(algorithm, key, data) {
-      var res = __cryptoSubtleDecrypt(_algoToJSON(algorithm), key.__id, _toB64(data));
+      var res = __go_cryptoSubtleDecrypt(_algoToJSON(algorithm), key.__id, _toB64(data));
       if (res.slice(0,6) === 'ERROR:') throw new DOMException(res.slice(6), 'OperationError');
       return _fromB64(res);
     },
     deriveBits: async function(algorithm, key, length) {
-      var res = __cryptoSubtleDeriveBits(_algoToJSON(algorithm), key.__id, String(length));
+      var res = __go_cryptoSubtleDeriveBits(_algoToJSON(algorithm), key.__id, String(length));
       if (res.slice(0,6) === 'ERROR:') throw new DOMException(res.slice(6), 'OperationError');
       return _fromB64(res);
     },
@@ -112,7 +112,7 @@
 
   globalThis.crypto = {
     randomUUID: function() {
-      var bytes = new Uint8Array(__cryptoRandomBytes(16));
+      var bytes = new Uint8Array(__go_cryptoRandomBytes(16));
       bytes[6] = (bytes[6] & 0x0f) | 0x40;
       bytes[8] = (bytes[8] & 0x3f) | 0x80;
       var hex = Array.prototype.map.call(bytes, function(x) { return x.toString(16).padStart(2, '0'); });
@@ -123,7 +123,7 @@
              hex.slice(10,16).join('');
     },
     getRandomValues: function(arr) {
-      var bytes = new Uint8Array(__cryptoRandomBytes(arr.byteLength));
+      var bytes = new Uint8Array(__go_cryptoRandomBytes(arr.byteLength));
       var view = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
       for (var i = 0; i < bytes.length; i++) view[i] = bytes[i];
       return arr;

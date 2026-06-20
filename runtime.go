@@ -1,7 +1,9 @@
-package netlifyruntime
+package astroruntime
 
 import (
+	"context"
 	"crypto/rand"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,9 +13,8 @@ import (
 	"os"
 	"strings"
 	"time"
-	_ "embed"
 
-	"github.com/fastschema/qjs"
+	"github.com/dxkite/qjs"
 )
 
 // fetchClient is a shared HTTP client with a 30-second timeout to prevent
@@ -29,7 +30,7 @@ type Pool struct {
 }
 
 // NewPool creates `size` QJS runtimes, each initialized with:
-//  1. Go host functions (__cryptoRandomBytes, __consoleWrite, __goFetchRaw)
+//  1. Go host functions (__go_cryptoRandomBytes, __go_consoleWrite, __go_fetchRaw)
 //  2. Web API polyfills (Headers, Request, Response, crypto, File, console, fetch)
 //  3. The CJS SSR bundle wrapped in a factory (sets globalThis.__ssrHandler)
 //  4. The JS glue adapter (defines globalThis.__handleRequest)
@@ -161,67 +162,61 @@ try {
 	}
 	v.Free()
 
-	// __cryptoRandomBytes(n) — returns ArrayBuffer of n cryptographically-random bytes
-	ctx.SetFunc("__cryptoRandomBytes", func(this *qjs.This) (*qjs.Value, error) {
-		args := this.Args()
+	// __go_cryptoRandomBytes(n) — returns ArrayBuffer of n cryptographically-random bytes
+	ctx.SetGoFunc("__go_cryptoRandomBytes", func(_ context.Context, args ...any) (any, error) {
 		if len(args) == 0 {
-			return nil, fmt.Errorf("__cryptoRandomBytes requires 1 argument")
+			return nil, fmt.Errorf("__go_cryptoRandomBytes requires 1 argument")
 		}
-		n := int(args[0].Int32())
+		n, _ := args[0].(int64)
 		if n <= 0 || n > 65536 {
-			return nil, fmt.Errorf("__cryptoRandomBytes: invalid size %d", n)
+			return nil, fmt.Errorf("__go_cryptoRandomBytes: invalid size %d", n)
 		}
 		buf := make([]byte, n)
 		if _, err := rand.Read(buf); err != nil {
 			return nil, fmt.Errorf("rand.Read: %w", err)
 		}
-		return ctx.NewArrayBuffer(buf), nil
+		return buf, nil
 	})
 
-	// __consoleWrite(level, message) — forwards to Go stderr
-	ctx.SetFunc("__consoleWrite", func(this *qjs.This) (*qjs.Value, error) {
-		args := this.Args()
+	// __go_consoleWrite(level, message) — forwards to Go stderr
+	ctx.SetGoFunc("__go_consoleWrite", func(_ context.Context, args ...any) (any, error) {
 		level, msg := "log", ""
 		if len(args) > 0 {
-			level = args[0].String()
+			level, _ = args[0].(string)
 		}
 		if len(args) > 1 {
-			msg = args[1].String()
+			msg, _ = args[1].(string)
 		}
 		fmt.Fprintf(os.Stderr, "[JS %s] %s\n", level, msg)
-		return this.Context().NewString(""), nil
+		return "", nil
 	})
 
 	injectBinaryOps(ctx)
 	injectURLParser(ctx)
 	injectCryptoSubtle(ctx, keyReg)
 
-	// __goFetchRaw(url, method, headersJSON, body) — synchronous Go HTTP client.
-	// Blocks the QJS event loop goroutine until the HTTP response is received.
-	// wazero runs QJS in a single-threaded WASM module; goroutine callbacks from
-	// SetAsyncFunc race against the event loop and corrupt WASM memory. Using
-	// SetFunc with a blocking call is safe because only one goroutine ever touches
-	// the WASM instance at a time (the pool ensures exclusive runtime access).
-	ctx.SetFunc("__goFetchRaw", func(this *qjs.This) (*qjs.Value, error) {
-		args := this.Args()
+	// __go_fetchRaw(url, method, headersJSON, body) — async Go HTTP client.
+	// Each call spawns a goroutine that performs the HTTP request and resolves
+	// the returned JS Promise via the QJS pendingCallbacks channel.
+	// Promise.allSettled([fetch(a), fetch(b), fetch(c)]) launches all goroutines
+	// concurrently; the QJS event loop drains the channel as each one completes.
+	ctx.SetGoAsyncFunc("__go_fetchRaw", func(_ context.Context, args ...any) (any, error) {
 		urlStr, method, headersJSON, reqBody := "", "GET", "{}", ""
 		if len(args) > 0 {
-			urlStr = args[0].String()
+			urlStr, _ = args[0].(string)
 		}
 		if len(args) > 1 {
-			method = args[1].String()
+			method, _ = args[1].(string)
 		}
 		if len(args) > 2 {
-			headersJSON = args[2].String()
+			headersJSON, _ = args[2].(string)
 		}
-		if len(args) > 3 && !args[3].IsNull() && !args[3].IsUndefined() {
-			reqBody = args[3].String()
+		if len(args) > 3 {
+			if s, _ := args[3].(string); s != "null" && s != "undefined" {
+				reqBody = s
+			}
 		}
-		result, err := goFetch(urlStr, method, headersJSON, reqBody)
-		if err != nil {
-			return nil, err
-		}
-		return ctx.NewString(result), nil
+		return goFetch(urlStr, method, headersJSON, reqBody)
 	})
 
 	return nil
@@ -230,71 +225,74 @@ try {
 // injectBinaryOps registers host functions for binary data transfer between Go and QJS.
 // Enables efficient UTF-8 encoding/decoding and base64 conversion via Go stdlib.
 func injectBinaryOps(ctx *qjs.Context) {
-	// __textEncodeUTF8(str) → ArrayBuffer — Go string is already UTF-8
-	ctx.SetFunc("__textEncodeUTF8", func(this *qjs.This) (*qjs.Value, error) {
-		if len(this.Args()) == 0 {
-			return ctx.NewArrayBuffer([]byte{}), nil
+	// __go_textEncodeUTF8(str) → ArrayBuffer — Go string is already UTF-8
+	ctx.SetGoFunc("__go_textEncodeUTF8", func(_ context.Context, args ...any) (any, error) {
+		if len(args) == 0 {
+			return []byte{}, nil
 		}
-		return ctx.NewArrayBuffer([]byte(this.Args()[0].String())), nil
+		s, _ := args[0].(string)
+		return []byte(s), nil
 	})
 
-	// __textDecodeUTF8(b64) → string — decodes base64 bytes as UTF-8 string
-	ctx.SetFunc("__textDecodeUTF8", func(this *qjs.This) (*qjs.Value, error) {
-		if len(this.Args()) == 0 {
-			return ctx.NewString(""), nil
+	// __go_textDecodeUTF8(b64) → string — decodes base64 bytes as UTF-8 string
+	ctx.SetGoFunc("__go_textDecodeUTF8", func(_ context.Context, args ...any) (any, error) {
+		if len(args) == 0 {
+			return "", nil
 		}
-		b, err := base64.StdEncoding.DecodeString(this.Args()[0].String())
+		s, _ := args[0].(string)
+		b, err := base64.StdEncoding.DecodeString(s)
 		if err != nil {
-			return ctx.NewString(""), nil
+			return "", nil
 		}
-		return ctx.NewString(string(b)), nil
+		return string(b), nil
 	})
 
-	// __bufToB64(jsonNumArray) → base64 string — JS passes byte array as JSON [1,2,3,...]
-	ctx.SetFunc("__bufToB64", func(this *qjs.This) (*qjs.Value, error) {
-		if len(this.Args()) == 0 {
-			return ctx.NewString(""), nil
+	// __go_bufToB64(jsonNumArray) → base64 string — JS passes byte array as JSON [1,2,3,...]
+	ctx.SetGoFunc("__go_bufToB64", func(_ context.Context, args ...any) (any, error) {
+		if len(args) == 0 {
+			return "", nil
 		}
+		s, _ := args[0].(string)
 		var nums []int
-		if err := json.Unmarshal([]byte(this.Args()[0].String()), &nums); err != nil {
-			return ctx.NewString(""), nil
+		if err := json.Unmarshal([]byte(s), &nums); err != nil {
+			return "", nil
 		}
 		buf := make([]byte, len(nums))
 		for i, n := range nums {
 			buf[i] = byte(n)
 		}
-		return ctx.NewString(base64.StdEncoding.EncodeToString(buf)), nil
+		return base64.StdEncoding.EncodeToString(buf), nil
 	})
 
-	// __b64ToBuf(b64) → ArrayBuffer — decodes base64 to binary ArrayBuffer
-	ctx.SetFunc("__b64ToBuf", func(this *qjs.This) (*qjs.Value, error) {
-		if len(this.Args()) == 0 {
-			return ctx.NewArrayBuffer([]byte{}), nil
+	// __go_b64ToBuf(b64) → ArrayBuffer — decodes base64 to binary ArrayBuffer
+	ctx.SetGoFunc("__go_b64ToBuf", func(_ context.Context, args ...any) (any, error) {
+		if len(args) == 0 {
+			return []byte{}, nil
 		}
-		b, err := base64.StdEncoding.DecodeString(this.Args()[0].String())
+		s, _ := args[0].(string)
+		b, err := base64.StdEncoding.DecodeString(s)
 		if err != nil {
-			return ctx.NewArrayBuffer([]byte{}), nil
+			return []byte{}, nil
 		}
-		return ctx.NewArrayBuffer(b), nil
+		return b, nil
 	})
 }
 
-// injectURLParser registers __urlParse for WHATWG-compliant URL parsing via net/url.
+// injectURLParser registers __go_urlParse for WHATWG-compliant URL parsing via net/url.
 func injectURLParser(ctx *qjs.Context) {
-	ctx.SetFunc("__urlParse", func(this *qjs.This) (*qjs.Value, error) {
-		args := this.Args()
-		errResult := func(msg string) (*qjs.Value, error) {
+	ctx.SetGoFunc("__go_urlParse", func(_ context.Context, args ...any) (any, error) {
+		errResult := func(msg string) (any, error) {
 			r, _ := json.Marshal(map[string]string{"error": msg})
-			return ctx.NewString(string(r)), nil
+			return string(r), nil
 		}
 
 		if len(args) == 0 {
 			return errResult("missing input")
 		}
-		input := args[0].String()
+		input, _ := args[0].(string)
 		baseStr := ""
 		if len(args) > 1 {
-			baseStr = args[1].String()
+			baseStr, _ = args[1].(string)
 		}
 
 		var u *url.URL
@@ -348,7 +346,7 @@ func injectURLParser(ctx *qjs.Context) {
 			"username": username,
 			"password": password,
 		})
-		return ctx.NewString(string(result)), nil
+		return string(result), nil
 	})
 }
 

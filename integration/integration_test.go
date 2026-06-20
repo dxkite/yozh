@@ -12,169 +12,21 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	netlifyruntime "github.com/dxkite/astro-runtime"
+	astroruntime "github.com/dxkite/astro-runtime"
 )
 
-// loadPool loads the pre-bundled testapp-ssr CJS from testdata.
-func loadPool(t *testing.T, size int) *netlifyruntime.Pool {
-	t.Helper()
-	bundle := filepath.Join("testdata", "testapp-ssr", "bundle.cjs")
-	code, err := os.ReadFile(bundle)
-	if err != nil {
-		t.Fatalf("read testdata bundle: %v", err)
-	}
-	pool, err := netlifyruntime.NewPool(code, map[string]string{"NODE_ENV": "production"}, size)
-	if err != nil {
-		t.Fatalf("NewPool: %v", err)
-	}
-	return pool
-}
+// Package-level pools initialized once in TestMain to avoid per-test QJS runtime startup cost.
+var (
+	sharedPool  *astroruntime.Pool // testapp-ssr bundle, size=4, for general SSR tests
+	sessionPool *astroruntime.Pool // testapp-ssr bundle, size=1, for TestCartSession (requires single runtime)
+	minPool     *astroruntime.Pool // eval-based minimal bundle, size=4, for polyfill/crypto/BFF tests
+)
 
-// do performs a single SSR request and returns the response recorder.
-func do(t *testing.T, pool *netlifyruntime.Pool, method, path, cookie, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	var bodyReader *strings.Reader
-	if body != "" {
-		bodyReader = strings.NewReader(body)
-	}
-	var req *http.Request
-	var err error
-	if bodyReader != nil {
-		req, err = http.NewRequest(method, "http://localhost"+path, bodyReader)
-	} else {
-		req, err = http.NewRequest(method, "http://localhost"+path, nil)
-	}
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	if cookie != "" {
-		req.Header.Set("Cookie", cookie)
-	}
-	if body != "" {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	w := httptest.NewRecorder()
-	netlifyruntime.HandleSSR(pool, w, req)
-	return w
-}
-
-// ── Original 11 test cases ────────────────────────────────────────────────────
-
-func TestHomePage(t *testing.T) {
-	pool := loadPool(t, 2)
-	w := do(t, pool, "GET", "/", "", "")
-	if w.Code != 200 {
-		t.Fatalf("status %d, want 200", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "Online Store") {
-		t.Errorf("body missing 'Online Store'; got: %.200s", w.Body.String())
-	}
-}
-
-func TestProductDetail(t *testing.T) {
-	pool := loadPool(t, 2)
-	w := do(t, pool, "GET", "/products/1", "", "")
-	if w.Code != 200 {
-		t.Fatalf("status %d, want 200", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "Cereal") {
-		t.Errorf("body missing 'Cereal'; got: %.200s", w.Body.String())
-	}
-}
-
-func TestProductNotFound(t *testing.T) {
-	pool := loadPool(t, 2)
-	w := do(t, pool, "GET", "/products/99", "", "")
-	if w.Code != 302 && w.Code != 301 && w.Code != 200 {
-		t.Fatalf("status %d, want redirect or 200", w.Code)
-	}
-}
-
-func TestProductsAPI(t *testing.T) {
-	pool := loadPool(t, 2)
-	w := do(t, pool, "GET", "/api/products", "", "")
-	if w.Code != 200 {
-		t.Fatalf("status %d, want 200", w.Code)
-	}
-	var items []map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &items); err != nil {
-		t.Fatalf("JSON parse: %v — body: %.200s", err, w.Body.String())
-	}
-	if len(items) == 0 {
-		t.Errorf("expected non-empty product list")
-	}
-}
-
-func TestSingleProductAPI(t *testing.T) {
-	pool := loadPool(t, 2)
-	w := do(t, pool, "GET", "/api/products/2", "", "")
-	if w.Code != 200 {
-		t.Fatalf("status %d, want 200", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "Yogurt") {
-		t.Errorf("body missing 'Yogurt'; got: %.200s", w.Body.String())
-	}
-}
-
-func TestCartEmpty(t *testing.T) {
-	pool := loadPool(t, 2)
-	w := do(t, pool, "GET", "/cart", "", "")
-	if w.Code != 200 {
-		t.Fatalf("status %d, want 200", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "empty") {
-		t.Errorf("body missing 'empty'; got: %.200s", w.Body.String())
-	}
-}
-
-func TestCartAPIEmpty(t *testing.T) {
-	pool := loadPool(t, 2)
-	w := do(t, pool, "GET", "/api/cart", "", "")
-	if w.Code != 200 {
-		t.Fatalf("status %d, want 200", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "items") {
-		t.Errorf("body missing 'items'; got: %.200s", w.Body.String())
-	}
-}
-
-// TestCartSession uses pool size 1 so all requests hit the same runtime (same in-memory session Map).
-func TestCartSession(t *testing.T) {
-	pool := loadPool(t, 1)
-	cookie := "user-id=integtest999"
-
-	w := do(t, pool, "POST", "/api/cart", cookie, `{"id":1,"name":"Cereal"}`)
-	if w.Code != 200 {
-		t.Fatalf("add to cart: status %d — body: %.200s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "ok") {
-		t.Errorf("add to cart: expected 'ok'; got: %.200s", w.Body.String())
-	}
-
-	w = do(t, pool, "GET", "/api/cart", cookie, "")
-	if w.Code != 200 {
-		t.Fatalf("get cart: status %d", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "Cereal") {
-		t.Errorf("cart API missing 'Cereal'; got: %.200s", w.Body.String())
-	}
-
-	w = do(t, pool, "GET", "/cart", cookie, "")
-	if w.Code != 200 {
-		t.Fatalf("cart page: status %d", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "Cereal") {
-		t.Errorf("cart page missing 'Cereal'; got: %.200s", w.Body.String())
-	}
-}
-
-// ── Polyfill unit tests ───────────────────────────────────────────────────────
-
-// minimalPool creates a pool with a minimal CJS bundle for polyfill testing.
-func minimalPool(t *testing.T, size int) *netlifyruntime.Pool {
-	t.Helper()
-	bundle := []byte(`
+// minBundle is a minimal CJS bundle that evals arbitrary JS expressions via query param,
+// used by polyfill, crypto, and BFF tests to drive the runtime without a real Astro app.
+var minBundle = []byte(`
 module.exports.default = function(config) {
     return async function handler(request, context) {
         var url = new URL(request.url);
@@ -203,14 +55,168 @@ module.exports.default = function(config) {
     };
 };
 `)
-	pool, err := netlifyruntime.NewPool(bundle, map[string]string{}, size)
+
+func TestMain(m *testing.M) {
+	bundle, err := os.ReadFile(filepath.Join("testdata", "testapp-ssr", "bundle.cjs"))
 	if err != nil {
-		t.Fatalf("minimalPool NewPool: %v", err)
+		fmt.Fprintf(os.Stderr, "read testdata bundle: %v\n", err)
+		os.Exit(1)
 	}
-	return pool
+
+	sharedPool, err = astroruntime.NewPool(bundle, map[string]string{"NODE_ENV": "production"}, 4)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "NewPool sharedPool: %v\n", err)
+		os.Exit(1)
+	}
+
+	sessionPool, err = astroruntime.NewPool(bundle, map[string]string{"NODE_ENV": "production"}, 1)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "NewPool sessionPool: %v\n", err)
+		os.Exit(1)
+	}
+
+	minPool, err = astroruntime.NewPool(minBundle, map[string]string{}, 4)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "NewPool minPool: %v\n", err)
+		os.Exit(1)
+	}
+
+	os.Exit(m.Run())
 }
 
-func evalExpr(t *testing.T, pool *netlifyruntime.Pool, expr string) map[string]interface{} {
+// do performs a single SSR request and returns the response recorder.
+func do(t *testing.T, pool *astroruntime.Pool, method, path, cookie, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var bodyReader *strings.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+	var req *http.Request
+	var err error
+	if bodyReader != nil {
+		req, err = http.NewRequest(method, "http://localhost"+path, bodyReader)
+	} else {
+		req, err = http.NewRequest(method, "http://localhost"+path, nil)
+	}
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	w := httptest.NewRecorder()
+	astroruntime.HandleSSR(pool, w, req)
+	return w
+}
+
+// ── Original SSR test cases ───────────────────────────────────────────────────
+
+func TestHomePage(t *testing.T) {
+	w := do(t, sharedPool, "GET", "/", "", "")
+	if w.Code != 200 {
+		t.Fatalf("status %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Online Store") {
+		t.Errorf("body missing 'Online Store'; got: %.200s", w.Body.String())
+	}
+}
+
+func TestProductDetail(t *testing.T) {
+	w := do(t, sharedPool, "GET", "/products/1", "", "")
+	if w.Code != 200 {
+		t.Fatalf("status %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Cereal") {
+		t.Errorf("body missing 'Cereal'; got: %.200s", w.Body.String())
+	}
+}
+
+func TestProductNotFound(t *testing.T) {
+	w := do(t, sharedPool, "GET", "/products/99", "", "")
+	if w.Code != 302 && w.Code != 301 && w.Code != 200 {
+		t.Fatalf("status %d, want redirect or 200", w.Code)
+	}
+}
+
+func TestProductsAPI(t *testing.T) {
+	w := do(t, sharedPool, "GET", "/api/products", "", "")
+	if w.Code != 200 {
+		t.Fatalf("status %d, want 200", w.Code)
+	}
+	var items []map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &items); err != nil {
+		t.Fatalf("JSON parse: %v — body: %.200s", err, w.Body.String())
+	}
+	if len(items) == 0 {
+		t.Errorf("expected non-empty product list")
+	}
+}
+
+func TestSingleProductAPI(t *testing.T) {
+	w := do(t, sharedPool, "GET", "/api/products/2", "", "")
+	if w.Code != 200 {
+		t.Fatalf("status %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Yogurt") {
+		t.Errorf("body missing 'Yogurt'; got: %.200s", w.Body.String())
+	}
+}
+
+func TestCartEmpty(t *testing.T) {
+	w := do(t, sharedPool, "GET", "/cart", "", "")
+	if w.Code != 200 {
+		t.Fatalf("status %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "empty") {
+		t.Errorf("body missing 'empty'; got: %.200s", w.Body.String())
+	}
+}
+
+func TestCartAPIEmpty(t *testing.T) {
+	w := do(t, sharedPool, "GET", "/api/cart", "", "")
+	if w.Code != 200 {
+		t.Fatalf("status %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "items") {
+		t.Errorf("body missing 'items'; got: %.200s", w.Body.String())
+	}
+}
+
+// TestCartSession uses sessionPool (size=1) so all requests hit the same runtime (same in-memory session Map).
+func TestCartSession(t *testing.T) {
+	cookie := "user-id=integtest999"
+
+	w := do(t, sessionPool, "POST", "/api/cart", cookie, `{"id":1,"name":"Cereal"}`)
+	if w.Code != 200 {
+		t.Fatalf("add to cart: status %d — body: %.200s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ok") {
+		t.Errorf("add to cart: expected 'ok'; got: %.200s", w.Body.String())
+	}
+
+	w = do(t, sessionPool, "GET", "/api/cart", cookie, "")
+	if w.Code != 200 {
+		t.Fatalf("get cart: status %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Cereal") {
+		t.Errorf("cart API missing 'Cereal'; got: %.200s", w.Body.String())
+	}
+
+	w = do(t, sessionPool, "GET", "/cart", cookie, "")
+	if w.Code != 200 {
+		t.Fatalf("cart page: status %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Cereal") {
+		t.Errorf("cart page missing 'Cereal'; got: %.200s", w.Body.String())
+	}
+}
+
+// ── Polyfill unit tests ───────────────────────────────────────────────────────
+
+func evalExpr(t *testing.T, pool *astroruntime.Pool, expr string) map[string]interface{} {
 	t.Helper()
 	path := "/test?expr=" + encodeURIComponent(expr)
 	w := do(t, pool, "GET", path, "", "")
@@ -243,33 +249,29 @@ func encodeURIComponent(s string) string {
 }
 
 func TestTextEncoderDecoder(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(function() { var e = new TextEncoder(); var u = e.encode("hello"); return u.byteLength; })()`)
+	r := evalExpr(t, minPool, `(function() { var e = new TextEncoder(); var u = e.encode("hello"); return u.byteLength; })()`)
 	if r["result"] != float64(5) {
 		t.Errorf("TextEncoder encode byteLength: got %v, want 5", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(function() { var e = new TextEncoder(); return e.encode("中").byteLength; })()`)
+	r = evalExpr(t, minPool, `(function() { var e = new TextEncoder(); return e.encode("中").byteLength; })()`)
 	if r["result"] != float64(3) {
 		t.Errorf("TextEncoder encode Chinese char: got %v, want 3", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(function() { var e = new TextEncoder(); var d = new TextDecoder(); return d.decode(e.encode("hello world")); })()`)
+	r = evalExpr(t, minPool, `(function() { var e = new TextEncoder(); var d = new TextDecoder(); return d.decode(e.encode("hello world")); })()`)
 	if r["result"] != "hello world" {
 		t.Errorf("TextDecoder round-trip: got %v, want 'hello world'", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(function() { var e = new TextEncoder(); var d = new TextDecoder(); return d.decode(e.encode("中文")); })()`)
+	r = evalExpr(t, minPool, `(function() { var e = new TextEncoder(); var d = new TextDecoder(); return d.decode(e.encode("中文")); })()`)
 	if r["result"] != "中文" {
 		t.Errorf("TextDecoder multi-byte round-trip: got %v, want '中文'", r["result"])
 	}
 }
 
 func TestHeadersSetCookie(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(function() {
+	r := evalExpr(t, minPool, `(function() {
 		var h = new Headers();
 		h.append('set-cookie', 'a=1; Path=/');
 		h.append('set-cookie', 'b=2; Path=/; Secure');
@@ -279,7 +281,7 @@ func TestHeadersSetCookie(t *testing.T) {
 		t.Errorf("getSetCookie count: got %v, want 2", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(function() {
+	r = evalExpr(t, minPool, `(function() {
 		var h = new Headers();
 		h.append('set-cookie', 'data=foo,bar; Path=/');
 		var cookies = h.getSetCookie();
@@ -291,51 +293,46 @@ func TestHeadersSetCookie(t *testing.T) {
 }
 
 func TestAtobBtoa(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `btoa('hello world')`)
+	r := evalExpr(t, minPool, `btoa('hello world')`)
 	if r["result"] != "aGVsbG8gd29ybGQ=" {
 		t.Errorf("btoa: got %v, want 'aGVsbG8gd29ybGQ='", r["result"])
 	}
 
-	r = evalExpr(t, pool, `atob('aGVsbG8gd29ybGQ=')`)
+	r = evalExpr(t, minPool, `atob('aGVsbG8gd29ybGQ=')`)
 	if r["result"] != "hello world" {
 		t.Errorf("atob: got %v, want 'hello world'", r["result"])
 	}
 
-	r = evalExpr(t, pool, `atob(btoa('test data 123'))`)
+	r = evalExpr(t, minPool, `atob(btoa('test data 123'))`)
 	if r["result"] != "test data 123" {
 		t.Errorf("atob(btoa) round-trip: got %v", r["result"])
 	}
 }
 
 func TestURLParsing(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(function() { var u = new URL('http://example.com/path?q=1#hash'); return [u.hostname, u.pathname, u.search, u.hash].join('|'); })()`)
+	r := evalExpr(t, minPool, `(function() { var u = new URL('http://example.com/path?q=1#hash'); return [u.hostname, u.pathname, u.search, u.hash].join('|'); })()`)
 	if r["result"] != "example.com|/path|?q=1|#hash" {
 		t.Errorf("URL absolute: got %v", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(function() { var u = new URL('/other', 'http://base.com/path'); return u.href; })()`)
+	r = evalExpr(t, minPool, `(function() { var u = new URL('/other', 'http://base.com/path'); return u.href; })()`)
 	if r["result"] != "http://base.com/other" {
 		t.Errorf("URL relative: got %v, want 'http://base.com/other'", r["result"])
 	}
 
-	r = evalExpr(t, pool, `URL.canParse('http://valid.com')`)
+	r = evalExpr(t, minPool, `URL.canParse('http://valid.com')`)
 	if r["result"] != true {
 		t.Errorf("URL.canParse valid: got %v, want true", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(function() { var u = new URL('http://[::1]:8080/'); return u.host; })()`)
+	r = evalExpr(t, minPool, `(function() { var u = new URL('http://[::1]:8080/'); return u.host; })()`)
 	if r["result"] != "[::1]:8080" {
 		t.Errorf("URL IPv6 host: got %v, want '[::1]:8080'", r["result"])
 	}
 }
 
 func TestCryptoRandomUUID(t *testing.T) {
-	pool := minimalPool(t, 1)
-	r := evalExpr(t, pool, `crypto.randomUUID()`)
+	r := evalExpr(t, minPool, `crypto.randomUUID()`)
 	uuid, ok := r["result"].(string)
 	if !ok || len(uuid) != 36 {
 		t.Errorf("randomUUID: got %v (len %d), want 36-char UUID", r["result"], len(uuid))
@@ -347,9 +344,7 @@ func TestCryptoRandomUUID(t *testing.T) {
 }
 
 func TestCryptoSubtleDigest(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(async function() {
+	r := evalExpr(t, minPool, `(async function() {
 		var data = new TextEncoder().encode('abc');
 		var hash = await crypto.subtle.digest('SHA-256', data);
 		return hash.byteLength;
@@ -358,7 +353,7 @@ func TestCryptoSubtleDigest(t *testing.T) {
 		t.Errorf("SHA-256 digest byteLength: got %v, want 32", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(async function() {
+	r = evalExpr(t, minPool, `(async function() {
 		var hash = await crypto.subtle.digest('SHA-512', new TextEncoder().encode('hello'));
 		return hash.byteLength;
 	})()`)
@@ -368,9 +363,7 @@ func TestCryptoSubtleDigest(t *testing.T) {
 }
 
 func TestCryptoSubtleHMAC(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(async function() {
+	r := evalExpr(t, minPool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'HMAC', hash:'SHA-256'}, true, ['sign','verify']);
 		var data = new TextEncoder().encode('hello world');
 		var sig = await crypto.subtle.sign('HMAC', key, data);
@@ -382,7 +375,7 @@ func TestCryptoSubtleHMAC(t *testing.T) {
 		t.Errorf("HMAC sign/verify: got %v, want true", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(async function() {
+	r = evalExpr(t, minPool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'HMAC', hash:'SHA-256'}, false, ['sign']);
 		var sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode('test'));
 		return sig.byteLength;
@@ -391,7 +384,7 @@ func TestCryptoSubtleHMAC(t *testing.T) {
 		t.Errorf("HMAC SHA-256 sig byteLength: got %v, want 32", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(async function() {
+	r = evalExpr(t, minPool, `(async function() {
 		var rawKey = new Uint8Array(32);
 		crypto.getRandomValues(rawKey);
 		var key = await crypto.subtle.importKey('raw', rawKey, {name:'HMAC', hash:'SHA-256'}, false, ['sign','verify']);
@@ -402,7 +395,7 @@ func TestCryptoSubtleHMAC(t *testing.T) {
 		t.Errorf("HMAC importKey+sign+verify: got %v", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(async function() {
+	r = evalExpr(t, minPool, `(async function() {
 		var raw = new Uint8Array([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]);
 		var key = await crypto.subtle.importKey('raw', raw, {name:'HMAC', hash:'SHA-256'}, true, ['sign']);
 		var exported = await crypto.subtle.exportKey('raw', key);
@@ -415,9 +408,7 @@ func TestCryptoSubtleHMAC(t *testing.T) {
 }
 
 func TestCryptoSubtleAESGCM(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(async function() {
+	r := evalExpr(t, minPool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'AES-GCM', length:256}, true, ['encrypt','decrypt']);
 		var iv = crypto.getRandomValues(new Uint8Array(12));
 		var plain = new TextEncoder().encode('secret message');
@@ -429,7 +420,7 @@ func TestCryptoSubtleAESGCM(t *testing.T) {
 		t.Errorf("AES-GCM round-trip: got %v, want 'secret message'", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(async function() {
+	r = evalExpr(t, minPool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'AES-GCM', length:128}, false, ['encrypt','decrypt']);
 		var iv = new Uint8Array(12);
 		var cipher = await crypto.subtle.encrypt({name:'AES-GCM', iv:iv}, key, new TextEncoder().encode('data'));
@@ -442,9 +433,7 @@ func TestCryptoSubtleAESGCM(t *testing.T) {
 }
 
 func TestCryptoSubtleExportImportJWK(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(async function() {
+	r := evalExpr(t, minPool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'HMAC', hash:'SHA-256'}, true, ['sign','verify']);
 		var jwk = await crypto.subtle.exportKey('jwk', key);
 		var key2 = await crypto.subtle.importKey('jwk', jwk, {name:'HMAC', hash:'SHA-256'}, false, ['sign','verify']);
@@ -458,9 +447,7 @@ func TestCryptoSubtleExportImportJWK(t *testing.T) {
 }
 
 func TestGetRandomValues(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(function() {
+	r := evalExpr(t, minPool, `(function() {
 		var arr = new Uint8Array(16);
 		crypto.getRandomValues(arr);
 		var sum = 0;
@@ -474,7 +461,7 @@ func TestGetRandomValues(t *testing.T) {
 
 func TestPolyfillsQJSInit(t *testing.T) {
 	bundle := []byte(`module.exports.default = function() { return async function(req) { return new Response('ok'); }; };`)
-	_, err := netlifyruntime.NewPool(bundle, map[string]string{}, 2)
+	_, err := astroruntime.NewPool(bundle, map[string]string{}, 2)
 	if err != nil {
 		t.Fatalf("pool init failed (polyfill error): %v", err)
 	}
@@ -496,7 +483,7 @@ func TestPoolSizeValidation(t *testing.T) {
 		{1000, true},
 	}
 	for _, c := range cases {
-		_, err := netlifyruntime.NewPool(bundle, map[string]string{}, c.size)
+		_, err := astroruntime.NewPool(bundle, map[string]string{}, c.size)
 		if c.ok && err != nil {
 			t.Errorf("size=%d: unexpected error: %v", c.size, err)
 		}
@@ -519,7 +506,7 @@ module.exports.default = function() {
   };
 };
 `)
-	p, err := netlifyruntime.NewPool(bundle, map[string]string{}, 1)
+	p, err := astroruntime.NewPool(bundle, map[string]string{}, 1)
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -536,9 +523,7 @@ module.exports.default = function() {
 
 // TestURLSearchParamsSetter verifies that assigning url.search updates searchParams.
 func TestURLSearchParamsSetter(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(function() {
+	r := evalExpr(t, minPool, `(function() {
 		var u = new URL('http://example.com/');
 		u.search = '?foo=bar&x=1';
 		return u.searchParams.get('foo');
@@ -547,7 +532,7 @@ func TestURLSearchParamsSetter(t *testing.T) {
 		t.Errorf("URL search setter: searchParams.get('foo') = %v, want 'bar'", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(function() {
+	r = evalExpr(t, minPool, `(function() {
 		var u = new URL('http://example.com/?a=1');
 		u.search = '?b=2';
 		return u.searchParams.get('a') === null && u.searchParams.get('b') === '2';
@@ -556,7 +541,7 @@ func TestURLSearchParamsSetter(t *testing.T) {
 		t.Errorf("URL search setter: old params should be gone after reassignment: %v", r["result"])
 	}
 
-	r = evalExpr(t, pool, `(function() {
+	r = evalExpr(t, minPool, `(function() {
 		var u = new URL('http://example.com/?q=hello');
 		u.search = '';
 		return u.searchParams.get('q');
@@ -568,9 +553,7 @@ func TestURLSearchParamsSetter(t *testing.T) {
 
 // TestAESCBC verifies AES-CBC encrypt/decrypt round-trip.
 func TestAESCBC(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(async function() {
+	r := evalExpr(t, minPool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'AES-CBC', length:256}, true, ['encrypt','decrypt']);
 		var iv = crypto.getRandomValues(new Uint8Array(16));
 		var plain = new TextEncoder().encode('AES-CBC test message');
@@ -585,9 +568,7 @@ func TestAESCBC(t *testing.T) {
 
 // TestAESCBCWrongIV verifies that AES-CBC rejects an IV that is not exactly 16 bytes.
 func TestAESCBCWrongIV(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(async function() {
+	r := evalExpr(t, minPool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'AES-CBC', length:256}, false, ['encrypt','decrypt']);
 		var iv12 = new Uint8Array(12);
 		try {
@@ -605,9 +586,7 @@ func TestAESCBCWrongIV(t *testing.T) {
 
 // TestAESGCMWrongIV verifies that AES-GCM rejects an IV that is not exactly 12 bytes.
 func TestAESGCMWrongIV(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(async function() {
+	r := evalExpr(t, minPool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
 		var iv8 = new Uint8Array(8);
 		try {
@@ -626,11 +605,9 @@ func TestAESGCMWrongIV(t *testing.T) {
 // TestAESCBCTamperedCiphertext verifies that decryption fails when ciphertext is tampered,
 // confirming the constant-time padding validation rejects invalid input.
 func TestAESCBCTamperedCiphertext(t *testing.T) {
-	pool := minimalPool(t, 1)
-
 	// Pass a buffer of all zeros as ciphertext — decrypting random-key AES-CBC over zeros
 	// produces garbage that almost certainly fails PKCS7 padding validation.
-	r := evalExpr(t, pool, `(async function() {
+	r := evalExpr(t, minPool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'AES-CBC', length:256}, false, ['encrypt','decrypt']);
 		var iv = new Uint8Array(16);
 		var garbage = new Uint8Array(32); // valid length, invalid content
@@ -646,7 +623,7 @@ func TestAESCBCTamperedCiphertext(t *testing.T) {
 	}
 
 	// Wrong block size (not multiple of 16) must always fail.
-	r = evalExpr(t, pool, `(async function() {
+	r = evalExpr(t, minPool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'AES-CBC', length:256}, false, ['encrypt','decrypt']);
 		var iv = new Uint8Array(16);
 		var badLen = new Uint8Array(17);
@@ -673,9 +650,7 @@ func TestBFFUpstreamFetch(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, fmt.Sprintf(`(async function() {
+	r := evalExpr(t, minPool, fmt.Sprintf(`(async function() {
 		var res = await fetch('%s/products/1');
 		var data = await res.json();
 		return data.name;
@@ -686,11 +661,10 @@ func TestBFFUpstreamFetch(t *testing.T) {
 	}
 }
 
-// TestBFFAggregation verifies that BFF can call multiple upstream services and merge results.
-// Note: __goFetchRaw dispatches one Go goroutine per fetch; the wazero WASM module backing
-// QJS is single-threaded, so concurrent callbacks from multiple goroutines would race.
-// We therefore await each fetch sequentially — this matches how real Astro SSR API routes
-// should be written when targeting this runtime.
+// TestBFFAggregation verifies that BFF can call multiple upstream services concurrently
+// via Promise.allSettled and merge the results. __go_fetchRaw uses SetGoAsyncFunc: each
+// fetch spawns a goroutine and resolves its Promise via the QJS pendingCallbacks channel,
+// so all HTTP requests run in parallel while the event loop drains completions.
 func TestBFFAggregation(t *testing.T) {
 	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -704,12 +678,12 @@ func TestBFFAggregation(t *testing.T) {
 	}))
 	defer inventory.Close()
 
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, fmt.Sprintf(`(async function() {
-		var product  = await fetch('%s').then(r => r.json());
-		var inv      = await fetch('%s').then(r => r.json());
-		return JSON.stringify({ name: product.name, stock: inv.stock });
+	r := evalExpr(t, minPool, fmt.Sprintf(`(async function() {
+		var [pr, ir] = await Promise.allSettled([
+			fetch('%s').then(r => r.json()),
+			fetch('%s').then(r => r.json()),
+		]);
+		return JSON.stringify({ name: pr.value.name, stock: ir.value.stock });
 	})()`, catalog.URL, inventory.URL))
 
 	var agg map[string]any
@@ -724,8 +698,8 @@ func TestBFFAggregation(t *testing.T) {
 	}
 }
 
-// TestBFFGracefulDegradation verifies that a failed upstream (HTTP 500) is handled
-// without crashing the handler — the BFF returns partial data.
+// TestBFFGracefulDegradation verifies that Promise.allSettled handles a failed upstream
+// (HTTP 500) without crashing — the BFF returns partial data with nil for failed services.
 func TestBFFGracefulDegradation(t *testing.T) {
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -738,15 +712,14 @@ func TestBFFGracefulDegradation(t *testing.T) {
 	}))
 	defer bad.Close()
 
-	pool := minimalPool(t, 1)
-
-	// Fetch both sequentially; check res.ok for degradation (avoid throw inside eval/await).
-	r := evalExpr(t, pool, fmt.Sprintf(`(async function() {
-		var r1 = await fetch('%s');
-		var product = r1.ok ? await r1.json() : null;
-		var r2 = await fetch('%s');
-		var reviews = r2.ok ? await r2.json() : null;
-		return JSON.stringify({ product: product ? product.name : null, reviews: reviews });
+	r := evalExpr(t, minPool, fmt.Sprintf(`(async function() {
+		var [r1, r2] = await Promise.allSettled([
+			fetch('%s').then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); }),
+			fetch('%s').then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); }),
+		]);
+		var product = r1.status === 'fulfilled' ? r1.value.name : null;
+		var reviews = r2.status === 'fulfilled' ? r2.value : null;
+		return JSON.stringify({ product: product, reviews: reviews });
 	})()`, good.URL, bad.URL))
 
 	var out map[string]any
@@ -761,12 +734,56 @@ func TestBFFGracefulDegradation(t *testing.T) {
 	}
 }
 
+// TestBFFConcurrentFetch verifies that Promise.allSettled([fetch,fetch,fetch]) executes
+// requests in parallel: total elapsed time should be ~1× single request, not 3×.
+func TestBFFConcurrentFetch(t *testing.T) {
+	const delay = 80 * time.Millisecond
+
+	slow := func(body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(delay)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, body)
+		}
+	}
+
+	svc1 := httptest.NewServer(slow(`{"a":1}`))
+	defer svc1.Close()
+	svc2 := httptest.NewServer(slow(`{"b":2}`))
+	defer svc2.Close()
+	svc3 := httptest.NewServer(slow(`{"c":3}`))
+	defer svc3.Close()
+
+	start := time.Now()
+	r := evalExpr(t, minPool, fmt.Sprintf(`(async function() {
+		var [r1, r2, r3] = await Promise.allSettled([
+			fetch('%s').then(r => r.json()),
+			fetch('%s').then(r => r.json()),
+			fetch('%s').then(r => r.json()),
+		]);
+		return JSON.stringify({ a: r1.value.a, b: r2.value.b, c: r3.value.c });
+	})()`, svc1.URL, svc2.URL, svc3.URL))
+	elapsed := time.Since(start)
+
+	var out map[string]any
+	if err := json.Unmarshal([]byte(r["result"].(string)), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if out["a"] != float64(1) || out["b"] != float64(2) || out["c"] != float64(3) {
+		t.Errorf("unexpected values: %v", out)
+	}
+
+	t.Logf("3× %v concurrent fetch elapsed: %v", delay, elapsed)
+	// Sequential would be ≥ 3×delay; concurrent should finish in < 2×delay
+	if elapsed >= 3*delay {
+		t.Errorf("fetches appear sequential: elapsed %v ≥ 3×%v; expected concurrent (~1×)", elapsed, delay)
+	}
+}
+
 // TestBFFSessionMiddleware verifies the HMAC-based session token sign+verify pattern
 // used in src/middleware.ts: sign(btoa(userId)) → token → verify → decode userId.
 func TestBFFSessionMiddleware(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(async function() {
+	r := evalExpr(t, minPool, `(async function() {
 		var secret = 'test-session-secret';
 		var userId = 'user-abc-123';
 
@@ -803,9 +820,7 @@ func TestBFFSessionMiddleware(t *testing.T) {
 // TestBFFCartCookieRoundTrip verifies the AES-GCM cart cookie pattern from src/pages/api/cart.ts:
 // encrypt(items) → base64(iv).base64(ciphertext) → decrypt → same items.
 func TestBFFCartCookieRoundTrip(t *testing.T) {
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, `(async function() {
+	r := evalExpr(t, minPool, `(async function() {
 		var key = await crypto.subtle.generateKey({name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
 		var items = [{id:1, name:'Widget', price:9.99, count:2}];
 		var b64 = function(u8) { return btoa(String.fromCharCode(...u8)); };
@@ -841,7 +856,7 @@ func TestBFFUpstreamHMACAuth(t *testing.T) {
 	const secret = "upstream-signing-secret"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ts  := r.Header.Get("X-Timestamp")
+		ts := r.Header.Get("X-Timestamp")
 		sig := r.Header.Get("X-Signature")
 		if ts == "" || sig == "" {
 			http.Error(w, "missing auth", http.StatusUnauthorized)
@@ -859,9 +874,7 @@ func TestBFFUpstreamHMACAuth(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	pool := minimalPool(t, 1)
-
-	r := evalExpr(t, pool, fmt.Sprintf(`(async function() {
+	r := evalExpr(t, minPool, fmt.Sprintf(`(async function() {
 		var secret = '%s';
 		var ts = String(Date.now());
 		var key = await crypto.subtle.importKey(
@@ -887,10 +900,8 @@ func TestBFFUpstreamHMACAuth(t *testing.T) {
 
 // TestTextEncoderInto verifies encodeInto with partial buffer and correct read/written values.
 func TestTextEncoderInto(t *testing.T) {
-	pool := minimalPool(t, 1)
-
 	// Full fit: result.written === encoded length, result.read === str.length
-	r := evalExpr(t, pool, `(function() {
+	r := evalExpr(t, minPool, `(function() {
 		var enc = new TextEncoder();
 		var dest = new Uint8Array(20);
 		var res = enc.encodeInto('hello', dest);
@@ -901,7 +912,7 @@ func TestTextEncoderInto(t *testing.T) {
 	}
 
 	// Partial: 3-byte UTF-8 char '中' won't fit in a 2-byte dest
-	r = evalExpr(t, pool, `(function() {
+	r = evalExpr(t, minPool, `(function() {
 		var enc = new TextEncoder();
 		var dest = new Uint8Array(2);
 		var res = enc.encodeInto('中', dest);
@@ -912,7 +923,7 @@ func TestTextEncoderInto(t *testing.T) {
 	}
 
 	// Partial: 'ABC中' (3 ASCII + 3 UTF-8 bytes) into 5-byte dest — only 'ABC' fits
-	r = evalExpr(t, pool, `(function() {
+	r = evalExpr(t, minPool, `(function() {
 		var enc = new TextEncoder();
 		var dest = new Uint8Array(5);
 		var res = enc.encodeInto('ABC中', dest);

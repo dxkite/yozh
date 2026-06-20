@@ -16,7 +16,7 @@ globalThis.console = (function() {
     return function() {
       var parts = [];
       for (var i = 0; i < arguments.length; i++) parts.push(fmtArg(arguments[i]));
-      __consoleWrite(level, parts.join(' '));
+      __go_consoleWrite(level, parts.join(' '));
     };
   }
   return {
