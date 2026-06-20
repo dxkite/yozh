@@ -1,9 +1,10 @@
-# netlify-runtime 设计文档
+# astro-runtime 设计文档
 
 ## 项目目标
 
-在不依赖 Netlify CLI 的情况下，本地运行 `@astrojs/netlify` 适配器编译出的 SSR 函数。
-开发者执行 `astro build` 后，可直接使用本工具启动本地服务器，无需 `netlify dev` 或任何云端部署。
+在不依赖任何云平台 CLI 的情况下，直接运行 `@astrojs/netlify` 适配器编译的 Astro SSR 函数。
+面向两个场景：**网站模板 SSR**（本地/私有服务器部署）和 **BFF Render**（Go 服务按需渲染 Astro 页面）。
+详见 [adapter-selection.md](./adapter-selection.md)。
 
 ## 背景
 
@@ -16,7 +17,7 @@
 async function handler(request: Request, context: NetlifyContext): Promise<Response>
 ```
 
-Netlify 平台在运行时提供 Node.js 环境并注入 `Context` 对象。本工具在 Go 端模拟这套机制。
+Netlify 平台在运行时提供 Node.js 环境并注入 `Context` 对象。本项目在 Go 端模拟这套机制。
 
 ## 架构概览
 
@@ -24,7 +25,7 @@ Netlify 平台在运行时提供 Node.js 环境并注入 `Context` 对象。本�
 HTTP 请求
     │
     ▼
-server.go — 静态文件优先路由
+server.go — 静态文件优先路由（Netlify preferStatic 模拟）
     │ (未命中静态文件)
     ▼
 handler.go — 序列化请求 → JSON
@@ -34,9 +35,9 @@ runtime.go (Pool) — 从池中取出 QJS 运行时
     │
     ▼
 QJS (fastschema/qjs → QuickJS-NG via wazero)
-  ├── polyfills.go  — Web API polyfills (Headers/Request/Response/crypto/…)
-  ├── bundle (esbuild CJS) — Astro SSR bundle
-  └── glue.js — __handleRequest: JSON → Request → __ssrHandler → JSON
+  ├── js/         — Web API polyfills（8 个 JS 文件，//go:embed 嵌入）
+  ├── bundle CJS  — Astro SSR bundle（esbuild 打包，内存加载）
+  └── glue.js     — __handleRequest: JSON → Request → __ssrHandler → JSON
     │
     ▼
 Go: 解析 JSON 响应 → 写入 HTTP 响应
@@ -46,10 +47,11 @@ Go: 解析 JSON 响应 → 写入 HTTP 响应
 
 | 文件 | 职责 |
 |---|---|
-| `main.go` | CLI 入口，串联所有组件 |
+| `cmd/main.go` | CLI 入口，串联所有组件 |
 | `bundle.go` | esbuild 打包 `.mjs` → CJS 内存字节 |
 | `runtime.go` | QJS Pool 初始化，注入 host functions，eval polyfills + bundle + glue |
-| `polyfills.go` | JS polyfill 字符串常量（Web API、crypto、Intl、URL、setTimeout 等） |
+| `polyfills.go` | `//go:embed` 声明，将 `js/` 下的 JS 文件嵌入二进制 |
+| `crypto_subtle.go` | Web Crypto API Go 实现（digest、HMAC、AES-GCM/CBC、JWK 导入导出） |
 | `glue.js` | Go↔QJS 桥接，定义 `globalThis.__handleRequest` |
 | `handler.go` | 单次请求处理：序列化、调用 QJS、反序列化 |
 | `server.go` | HTTP 路由：静态文件优先，fallback SSR |
@@ -60,37 +62,56 @@ Go: 解析 JSON 响应 → 写入 HTTP 响应
 
 ```
 1. injectHostFunctions()
-   ├── __processEnv / process (含 Symbol.toStringTag = 'process')
-   ├── __cryptoRandomBytes(n) → Go crypto/rand
+   ├── __processEnv / process（含 Symbol.toStringTag = 'process'）
+   ├── __cryptoRandomBytes(n) → Go crypto/rand → ArrayBuffer
    ├── __consoleWrite(level, msg) → Go stderr
-   └── __goFetchRaw(url, method, headers, body) → Go http.Client (async)
+   ├── __goFetchRaw(url, method, headers, body) → Go http.Client（async）
+   │
+   ├── injectBinaryOps()
+   │   ├── __textEncodeUTF8(str) → ArrayBuffer
+   │   ├── __textDecodeUTF8(b64) → string
+   │   ├── __bufToB64(jsonNumArray) → base64 string
+   │   └── __b64ToBuf(b64) → ArrayBuffer
+   │
+   ├── injectURLParser()
+   │   └── __urlParse(input, base) → JSON（Go net/url 实现）
+   │
+   └── injectCryptoSubtle()
+       ├── __cryptoSubtleDigest(algo, dataB64) → resultB64
+       ├── __cryptoSubtleImportKey(format, data, algoJSON, extractable, usagesJSON) → keyId
+       ├── __cryptoSubtleGenerateKey(algoJSON, extractable, usagesJSON) → keyId
+       ├── __cryptoSubtleExportKey(format, keyId) → b64 或 JWK JSON
+       ├── __cryptoSubtleSign(algoJSON, keyId, dataB64) → sigB64
+       ├── __cryptoSubtleVerify(algoJSON, keyId, sigB64, dataB64) → "true"/"false"
+       ├── __cryptoSubtleEncrypt(algoJSON, keyId, plainB64) → cipherB64
+       └── __cryptoSubtleDecrypt(algoJSON, keyId, cipherB64) → plainB64
 
-2. webAPIPolyfill
+2. webAPIPolyfill（js/web-api.js）
    └── TextEncoder, TextDecoder, Headers, Request, Response
 
-3. cryptoPolyfill
-   └── globalThis.crypto.randomUUID / getRandomValues
+3. cryptoPolyfill（js/crypto.js）
+   └── globalThis.crypto.randomUUID / getRandomValues / subtle（JS 薄封装层）
 
-4. filePolyfill
+4. filePolyfill（js/file.js）
    └── Blob, File
 
-5. envAPIStub
+5. envAPIStub（js/env-api.js）
    └── WebAssembly, performance, setTimeout/clearTimeout, queueMicrotask,
-       atob/btoa, navigator, location
+       atob/btoa, navigator, location, URL, URLSearchParams
 
-6. intlStub
+6. intlStub（js/intl.js）
    └── Intl.DateTimeFormat / NumberFormat / Collator
 
-7. structuredCloneGuard
-   └── structuredClone (fallback)
+7. structuredCloneGuard（js/structured-clone.js）
+   └── structuredClone（fallback）
 
-8. consoleDef
+8. consoleDef（js/console.js）
    └── console.log/info/warn/error/debug → __consoleWrite
 
-9. fetchDef
+9. fetchDef（js/fetch.js）
    └── globalThis.fetch → __goFetchRaw
 
-10. CJS bundle (esbuild 打包的 Astro SSR)
+10. CJS bundle（esbuild 打包的 Astro SSR）
     └── 包装在 (function(module, exports){ ... }) 中，结尾提取 __ssrHandler
 
 11. glue.js
@@ -124,7 +145,7 @@ if (!globalThis.ReadableStream) try {
 }
 ```
 
-require shim 对 `node:stream/web` 主动 `throw`，使 bundle 激活内置的 web-streams-polyfill（同时我们也用 AsyncIterable 路径，双重保险）。
+require shim 对 `node:stream/web` 主动 `throw`，使 bundle 激活内置的 web-streams-polyfill。
 
 ### 3. Netlify adapter 二级工厂模式
 
@@ -147,21 +168,61 @@ Go 调用 `ctx.Eval("...", qjs.Code(code))` 传入 JS 代码字符串。
 最终拼接成 `await __handleRequest("...{escaped JSON}...")` 的 JS 代码片段，
 确保 payload 中任意字节（含引号、换行、Unicode）都能安全传入 QJS。
 
-### 5. AsyncIterable body 消费
+### 5. AsyncIterable body 消费（流式收集）
 
-当 `isNode = true`，Astro 的 `renderPage` 返回一个 `Response`，其 `body` 是异步生成器（`AsyncIterable<Uint8Array>`）。
-`Response.text()` 需要用 `for await...of` 迭代并用 `TextDecoder` 拼接：
+当 `isNode = true`，Astro 的 `renderPage` 返回的 Response body 是 `AsyncIterable<Uint8Array>`。
+`Response.text()` 将全部 chunk 的字节收集到 `allBytes[]`，一次性 UTF-8 解码，
+避免跨 chunk 边界截断多字节 UTF-8 序列：
+
 ```javascript
+var allBytes = [];
 for await (var chunk of b) {
-    parts.push(dec2.decode(chunk, { stream: true }));
+  var u8 = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk.buffer, ...);
+  for (var j = 0; j < u8.length; j++) allBytes.push(u8[j]);
 }
+return __textDecodeUTF8(__bufToB64(JSON.stringify(allBytes)));
+```
+
+### 6. 二进制数据跨边界传输（base64 + JSON）
+
+Go 与 QJS 之间传递二进制数据（密钥、密文、摘要）通过两种路径：
+
+- **ArrayBuffer 直传**（`ctx.NewArrayBuffer`）：用于 `__cryptoRandomBytes`、`__textEncodeUTF8`、`__b64ToBuf`
+- **base64 字符串**（JSON 编码）：用于 `__cryptoSubtle*` 系列函数（加密 API 的参数和返回值）
+
+JS 侧调用前用 `_toB64(typedArray)` 把 ArrayBuffer/TypedArray 序列化为 JSON 字节数组再转 base64，
+返回值用 `__b64ToBuf(b64)` 还原为 ArrayBuffer。
+
+### 7. 常量时间 PKCS7 填充验证（防 padding oracle）
+
+AES-CBC 解密的填充验证使用 XOR 累积方式，不提前退出：
+
+```go
+var invalid byte
+for i := len(data) - pad; i < len(data); i++ {
+    invalid |= data[i] ^ byte(pad)
+}
+if invalid != 0 {
+    return nil, fmt.Errorf("invalid padding")
+}
+```
+
+条件分支（提前 return）会产生可测量的时序差异，可被 padding oracle 攻击利用。
+
+### 8. fetch 超时保护
+
+`http.DefaultClient` 无超时，fetch() 调用可能永久阻塞并泄漏 goroutine。
+使用独立的 `fetchClient`：
+
+```go
+var fetchClient = &http.Client{Timeout: 30 * time.Second}
 ```
 
 ## 数据流
 
 ```
 Go HTTP Request
-    │ io.ReadAll (≤10MB)
+    │ io.ReadAll（≤10MB）
     │ json.Marshal → requestPayload{method, url, headers, body}
     │ json.Marshal(string) → JS 字符串字面量
     ▼
@@ -175,7 +236,7 @@ QJS: __ssrHandler(request, context)
     │ renderToAsyncIterable → AsyncGenerator<Uint8Array>
     │ new Response(asyncIterable, {status, headers})
     ▼
-QJS: response.text() → for await of asyncIterable → string
+QJS: response.text() → 收集全部字节 → __textDecodeUTF8 → string
     │ JSON.stringify({status, headers, body})
     ▼
 Go: json.Unmarshal → responsePayload
@@ -188,36 +249,28 @@ Go HTTP Response
 
 | 项目 | 说明 |
 |---|---|
-| 状态共享 | QJS Pool 的每个 runtime 持有独立 JS heap，`session` / `userCartItems` 等模块级变量跨请求保留但不跨 runtime 共享 |
-| 流式响应 | 当前实现收集全部 body 再返回，不支持真正的 HTTP 流式传输 |
-| WebAssembly | QJS 中 WebAssembly stub 永远返回不支持，依赖 WASM 的功能会失败 |
-| Svelte/Vue/React | 客户端 hydration 需要静态资源正确服务，SSR 部分可工作 |
-| `Astro.redirect` | 通过 3xx Response 返回，Go 端正确写入 Location 头 |
-| Windows symlink | `astro build` 在非开发者模式 Windows 上 EPERM，用 `.netlify/build/entry.mjs` 绕过 |
+| 状态共享 | Pool 中每个 runtime 持有独立 JS heap，模块级变量跨请求保留但不跨 runtime 共享 |
+| 流式响应 | 当前收集全部 body 再返回，不支持 HTTP 流式传输（Chunked Transfer） |
+| WebAssembly | QJS 中 WebAssembly stub 永远返回不支持 |
+| setTimeout 精度 | 非零 delay 的 setTimeout 立即执行（用 microtask 模拟），SSR 路径通常无影响 |
+| 二进制响应 | Response body 为字符串，图片/PDF 等二进制资源应走静态文件路由，不经 SSR |
 
 ## 依赖说明
 
 | 依赖 | 版本 | 用途 |
 |---|---|---|
 | `github.com/fastschema/qjs` | v0.0.6 | QuickJS-NG via wazero（纯 Go，无 CGO） |
-| `github.com/tetratelabs/wazero` | v1.9.0 | WebAssembly 运行时（被 qjs 依赖） |
+| `github.com/tetratelabs/wazero` | v1.9.0 | WebAssembly 运行时（qjs 间接依赖） |
 | `github.com/evanw/esbuild` | v0.25.0 | in-process JS 打包 |
 
-## 使用方式
+## CLI 使用方式
 
 ```bash
-# 1. 先构建 Astro 项目
-cd your-astro-project
-astro build
-
-# 2. 启动 netlify-runtime
-netlify-runtime \
+astro-runtime \
   --ssr .netlify/build/entry.mjs \
   --dist dist \
   --port 8888
 ```
-
-CLI 参数：
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|

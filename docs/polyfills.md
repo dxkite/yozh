@@ -14,7 +14,7 @@ webAPIPolyfill → cryptoPolyfill → filePolyfill → envAPIStub
 
 ---
 
-## 1. webAPIPolyfill
+## 1. webAPIPolyfill（js/web-api.js）
 
 ### TextEncoder
 
@@ -24,70 +24,82 @@ webAPIPolyfill → cryptoPolyfill → filePolyfill → envAPIStub
 - BMP（< 0x10000）：3 字节
 - 补充字符（Emoji 等）：4 字节，正确处理 `codePointAt` / `i += 2`
 
+`encode(str)` 调用 `__textEncodeUTF8` host function，Go 直接将字符串转为 `[]byte`（原生 UTF-8），
+返回真实 ArrayBuffer，而非 JS 位运算手工构建。
+
 `encodeInto(str, dest)` 写入到已有 TypedArray（Astro 渲染输出用到）。
+当 dest 容量不足时，向前回退找到最后一个完整 UTF-8 序列边界（跳过 continuation bytes 0x80–0xBF），
+避免写入截断的多字节字符。
 
 ### TextDecoder
 
 仅支持 UTF-8（`encoding` 参数接受但忽略非 UTF-8）。
-不支持 `stream: true` 的跨块 boundary 处理（对 SSR 够用，不做流式解码）。
+`decode(buf)` 先将字节数组序列化为 base64，再调用 `__textDecodeUTF8` host function。
 
 ### Headers
 
 - 内部存储为 `Object.create(null)`，key 统一小写
 - `append` 多值用 `, ` 连接（符合 HTTP/1.1 规范）
-- `getSetCookie()` 返回数组（Set-Cookie 不能合并）
-- **已知局限**：多值 Set-Cookie 合并后再 `split(', ')` 可能在 cookie value 含逗号时误切
+- `Set-Cookie` 单独存入 `_cookies[]` 数组，不参与 `, ` 合并，避免含逗号的 cookie value 被截断
+- `getSetCookie()` 直接返回 `_cookies.slice()`，不做 split
 
 ### Request
 
 - 支持 `new Request(url, init)` 和 `new Request(existingRequest)`
-- `body` 存为字符串，`text()` / `json()` / `arrayBuffer()` 同步返回（包装为 Promise）
+- `body` 存为字符串，`text()` / `json()` / `arrayBuffer()` 包装为 Promise
 - `clone()` 复制全部字段
 
 ### Response
 
 - `body` 支持：`null`、`string`、`Uint8Array`、`ReadableStream`（含 `getReader`）、`AsyncIterable`（含 `Symbol.asyncIterator`）
-- `Response.json(data, init)` 静态方法
-- `Response.redirect(url, status)` 静态方法
-- **已知局限**：`body instanceof Uint8Array` 在存为 body 时直接 `TextDecoder.decode()`，不保留二进制数据
+- 所有 body 类型均采用**全量字节收集 + 一次解码**策略：先将 chunk 字节追加到 `allBytes[]`，
+  再用 `__textDecodeUTF8(__bufToB64(JSON.stringify(allBytes)))` 统一解码，
+  避免跨 chunk 边界截断多字节 UTF-8 序列
+- `Response.json(data, init)` / `Response.redirect(url, status)` / `Response.error()` 静态方法
 
 ---
 
-## 2. cryptoPolyfill
+## 2. cryptoPolyfill（js/crypto.js）
 
 ### `crypto.randomUUID()`
 
 ```javascript
-// 16 随机字节 → UUID v4 格式
-var bytes = JSON.parse(__cryptoRandomBytes(16));
-bytes[6] = (bytes[6] & 0x0f) | 0x40;  // version 4
-bytes[8] = (bytes[8] & 0x3f) | 0x80;  // variant RFC 4122
+// 16 随机字节 → UUID v4 格式（version 4，RFC 4122 variant）
+bytes[6] = (bytes[6] & 0x0f) | 0x40;
+bytes[8] = (bytes[8] & 0x3f) | 0x80;
 ```
 
 ### `crypto.getRandomValues(typedArray)`
 
 按 typedArray 的 byteLength 调用 `__cryptoRandomBytes`，填充每个字节。
-支持 `Uint8Array`, `Int8Array`, `Uint16Array`, `Uint32Array` 等（实际按字节填充）。
+支持所有整数 TypedArray（Uint8Array、Uint32Array 等）。
+
+### `crypto.subtle`
+
+完整 Web Crypto API，由 JS 薄封装层调用 Go host functions（`__cryptoSubtle*`）实现。
+参见 [components.md](./components.md) crypto_subtle.go 节。
+
+支持的操作：
+- `digest`：SHA-1、SHA-256、SHA-384、SHA-512
+- `generateKey` / `importKey` / `exportKey`：HMAC（SHA-256/384/512）、AES-GCM、AES-CBC
+- `sign` / `verify`：HMAC
+- `encrypt` / `decrypt`：AES-GCM（12 字节 nonce）、AES-CBC（16 字节 IV + PKCS7）
 
 ### 为何先于 bundle eval
 
 Astro 的 `applyPolyfills()` 在 bundle 初始化时检查 `if (!globalThis.crypto)`，
-先设置 `globalThis.crypto` 可防止被 `require('node:crypto').webcrypto` 覆盖（require 返回 `{}`）。
+先设置 `globalThis.crypto` 可防止被 `require('node:crypto').webcrypto` 覆盖（require 返回 `{ webcrypto: globalThis.crypto }` — 实际上是循环引用，不覆盖）。
 
 ---
 
-## 3. filePolyfill
+## 3. filePolyfill（js/file.js）
 
 ### Blob
 
 QJS 无内置 Blob。实现：
 ```javascript
 class Blob {
-    constructor(parts, opts) {
-        this._parts = parts || [];
-        this.type = (opts && opts.type) || '';
-        this.size = this._parts.reduce((n, p) => n + (p && p.length != null ? p.length : 0), 0);
-    }
+    constructor(parts, opts) { this._parts = parts || []; ... }
     async text() { return this._parts.map(p => String(p)).join(''); }
     async arrayBuffer() { return new TextEncoder().encode(await this.text()).buffer; }
 }
@@ -105,48 +117,31 @@ class File extends globalThis.Blob {
 }
 ```
 
-`Date.now()` 在 QJS 中可用（非 `new Date()` 无参数构造）。
-
 ---
 
-## 4. envAPIStub
+## 4. envAPIStub（js/env-api.js）
 
 ### WebAssembly
 
-```javascript
-globalThis.WebAssembly = {
-    validate() { return false; },
-    instantiate() { return Promise.reject(new Error('WebAssembly not supported')); },
-    compile() { return Promise.reject(new Error('WebAssembly not supported')); },
-}
-```
-
+Stub，`instantiate/compile` 返回 rejected Promise，`validate` 返回 `false`。
 Astro 的某些路径检查 `typeof WebAssembly`，不设置会抛 ReferenceError。
 
 ### setTimeout / clearTimeout
 
 ```javascript
-var __timerMap = Object.create(null);
-var __timerId = 1;
 globalThis.setTimeout = function(fn, delay) {
     var id = __timerId++;
     if (!delay) {
         Promise.resolve().then(function() {
-            if (__timerMap[id] !== false) {
-                delete __timerMap[id];
-                if (typeof fn === 'function') fn();
-            }
+            if (__timerMap[id] !== false) fn();
         });
     }
-    __timerMap[id] = true;
     return id;
 };
-globalThis.clearTimeout = function(id) { __timerMap[id] = false; };
 ```
 
 - 仅用 microtask 实现"延迟"，不是真正的宏任务调度
 - 非零 delay 同样立即执行（QJS 无 OS 定时器，SSR 中 delay 值通常无意义）
-- `clearTimeout` 通过标记 `false` 防止执行（先设置 id 再调度，否则 `clearTimeout` 的竞争条件处理不了——实际上单线程无问题）
 
 ### queueMicrotask
 
@@ -156,38 +151,28 @@ globalThis.queueMicrotask = function(fn) { Promise.resolve().then(fn); };
 
 web-streams-polyfill 内部用到此 API。
 
-### URL
+### btoa / atob
 
-完整实现，处理：
-- 绝对 URL：`protocol://host:port/path?search#hash`
-- 相对路径（相对于 `base`）
-- `URL.canParse(url, base)` 静态方法
-- `searchParams`（URLSearchParams 实例）
-- `toString()` / `toJSON()` 返回 `href`
+通过 `__bufToB64` / `__b64ToBuf` host functions 实现，Go `encoding/base64` 处理，
+严格校验输入，不会静默损坏非法字符。
 
-**已知局限**：
-- URL 解析用正则，不是完整的 WHATWG URL 规范解析器
-- 不支持 `username:password@host` 格式（解析后 username/password 为空字符串）
-- `pathname` 不做 percent-encoding 规范化
+### URL / URLSearchParams
 
-### URLSearchParams
+`URL` 构造时调用 `__urlParse` host function，由 Go `net/url` 解析，支持：
+- 绝对 URL 和相对 URL（base 参数）
+- IPv6 地址、credentials（`username:password@host`）
+- `%` percent-encoding 规范化
+- 完整的 `searchParams`（URLSearchParams 实例）
 
-```
-get / getAll / has / set / append / delete / forEach / toString / [Symbol.iterator]
-```
-
-`toString()` 使用 `encodeURIComponent` 编码 key 和 value。
+`search` 属性通过 `Object.defineProperty` getter/setter 实现与 `searchParams` 的双向同步：
+设置 `url.search = '?foo=1'` 会重建对应的 `URLSearchParams` 对象。
 
 ---
 
-## 5. intlStub
-
-### 为何需要
+## 5. intlStub（js/intl.js）
 
 QuickJS-NG 不包含 ECMA-402（Internationalization API）。
 Astro 的日志模块和某些日期格式化路径调用 `new Intl.DateTimeFormat()`。
-
-### 实现范围
 
 | API | 实现 |
 |---|---|
@@ -197,27 +182,24 @@ Astro 的日志模块和某些日期格式化路径调用 `new Intl.DateTimeForm
 | `Intl.getCanonicalLocales` | 原样返回输入 |
 | `Intl.supportedValuesOf` | 返回空数组 |
 
-不支持本地化格式（locale 参数被接受但忽略）。
+locale 参数被接受但忽略，不支持本地化格式。
 
 ---
 
-## 6. structuredCloneGuard
+## 6. structuredCloneGuard（js/structured-clone.js）
 
 QuickJS-NG 已内置 `structuredClone`，此处仅为 fallback。
 JSON 往返实现不支持循环引用、`Date`、`Map`、`Set`、`RegExp` 等特殊类型。
 
 ---
 
-## 7. consoleDef
+## 7. consoleDef（js/console.js）
 
 ### Error 对象格式化
 
 ```javascript
 if (a instanceof Error || (a && typeof a.message === 'string' && typeof a.stack === 'string')) {
-    var s = a.name ? a.name + ': ' : '';
-    if (a.message) s += a.message;
-    if (a.stack) s += '\n' + a.stack;
-    return s;
+    return (a.name ? a.name + ': ' : '') + a.message + '\n' + a.stack;
 }
 ```
 
@@ -236,14 +218,14 @@ if (a instanceof Error || (a && typeof a.message === 'string' && typeof a.stack 
 
 ---
 
-## 8. fetchDef
+## 8. fetchDef（js/fetch.js）
 
 ### 实现路径
 
 ```
 globalThis.fetch(input, init)
-  → __goFetchRaw(url, method, headersJSON, body)   [async host function]
-  → Go: http.DefaultClient.Do(req)
+  → __goFetchRaw(url, method, headersJSON, body)  [async host function]
+  → Go: fetchClient.Do(req)（30 秒超时）
   → Go: JSON { status, headers, body }
   → new Response(body, { status, headers })
 ```
@@ -254,7 +236,7 @@ globalThis.fetch(input, init)
 - 不支持 `ReadableStream` 作为 `init.body`
 - 响应 body 限制 10MB（`io.LimitReader`）
 - 不支持 `AbortSignal` / `AbortController`
-- `mode`, `cache`, `redirect` 等选项被忽略
+- `mode`、`cache`、`redirect` 等选项被忽略
 
 ---
 
@@ -269,7 +251,8 @@ globalThis.fetch(input, init)
 | `Worker` | QJS 无线程 |
 | `IndexedDB` / `localStorage` | SSR 路径不需要 |
 | `Canvas` / `WebGL` | SSR 路径不需要 |
-| `crypto.subtle` | 仅 `randomUUID`/`getRandomValues` |
 | `Intl` 本地化格式 | stub 忽略 locale |
 | `Response.formData()` | 未实现 |
 | `Request.formData()` | 未实现 |
+| `crypto.subtle.deriveBits` / `deriveKey` | 未实现（PBKDF2、HKDF） |
+| ECDSA / RSA-OAEP | 未实现 |

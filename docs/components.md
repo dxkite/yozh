@@ -1,6 +1,6 @@
 # 组件文档
 
-## main.go — CLI 入口
+## cmd/main.go — CLI 入口
 
 ### 职责
 解析命令行参数，按顺序调用 bundle → pool → server。
@@ -34,13 +34,15 @@ func BundleSSR(entryPath string) ([]byte, error)
 |---|---|---|
 | `Format` | `FormatCommonJS` | QJS 需要单文件 CJS，一次 `ctx.Eval` 完成加载 |
 | `Platform` | `PlatformNeutral` | 不注入 Node/Browser 特定 shim |
-| `Target` | `ES2020` | QJS (QuickJS-NG) 支持 ES2020+ |
+| `Target` | `ES2020` | QJS（QuickJS-NG）支持 ES2020+ |
 | `Write` | `false` | 输出到内存，不写磁盘 |
 | `MainFields` | `["module", "main"]` | 优先使用 ESM 源码 |
 
 ### External 清单
 
-所有 `node:*` 和裸 Node 内置（`fs`, `path`, `crypto` 等）标记为 external，由 runtime.go 中的 `require` shim 处理。Netlify SDK（`@netlify/blobs` 等）和构建工具（`vite`, `esbuild`）也标记为 external，SSR 运行时不需要它们。
+所有 `node:*` 和裸 Node 内置（`fs`、`path`、`crypto` 等）标记为 external，
+由 runtime.go 中的 `require` shim 处理。Netlify SDK（`@netlify/blobs` 等）和构建工具
+（`vite`、`esbuild`）也标记为 external，SSR 运行时不需要它们。
 
 ### Define
 
@@ -71,7 +73,8 @@ func (p *Pool) Put(rt *qjs.Runtime)
 func (p *Pool) Close()
 ```
 
-`NewPool` 创建 Pool 后立即 Get/Put 一个 runtime 做 eager warm-up，在启动时暴露初始化错误。
+`NewPool` 校验 size 在 `[1, 1000]` 范围内，创建 Pool 后立即 Get/Put 一个 runtime 做 eager warm-up，
+在启动时暴露初始化错误。
 
 `Close()` 是空操作——`qjs.Pool` 无 Close 方法，池中 runtime 在程序退出时被 GC。
 
@@ -80,7 +83,7 @@ func (p *Pool) Close()
 每个 QJS Runtime 的初始化函数，顺序不可调换：
 
 1. **injectHostFunctions** — 注册 Go host functions
-2. **polyfills** — 8 个 JS 常量依次 `ctx.Eval`
+2. **polyfills** — 8 个 JS 文件依次 `ctx.Eval`
 3. **CJS bundle wrapper** — 用 `fmt.Sprintf` 拼接 `require` shim + bundle code
 4. **glue.js** — 定义 `__handleRequest`
 
@@ -119,101 +122,93 @@ globalThis.process = { env: __processEnv, version: 'v20.0.0', ... };
 Object.defineProperty(globalThis.process, Symbol.toStringTag, { value: 'process' });
 ```
 
-### injectHostFunctions
+### injectHostFunctions 注册的函数
 
-| Host Function | 参数 | 返回 | 实现 |
-|---|---|---|---|
-| `__cryptoRandomBytes(n)` | 字节数 | JSON 数字数组字符串 | `crypto/rand.Read` |
-| `__consoleWrite(level, msg)` | 日志级别、消息 | `""` | `fmt.Fprintf(os.Stderr, ...)` |
-| `__goFetchRaw(url, method, headersJSON, body)` | 请求参数 | JSON 响应字符串（async） | `http.DefaultClient.Do` |
+| Host Function | 类型 | 参数 | 返回 | 实现 |
+|---|---|---|---|---|
+| `__cryptoRandomBytes(n)` | 同步 | 字节数 | ArrayBuffer | `crypto/rand.Read` |
+| `__consoleWrite(level, msg)` | 同步 | 日志级别、消息 | `""` | `fmt.Fprintf(os.Stderr)` |
+| `__goFetchRaw(url, method, headersJSON, body)` | 异步 | 请求参数 | JSON 响应字符串 | `fetchClient.Do`（30s 超时） |
+| `__textEncodeUTF8(str)` | 同步 | 字符串 | ArrayBuffer | Go `[]byte(str)` |
+| `__textDecodeUTF8(b64)` | 同步 | base64 字符串 | 字符串 | `base64.Decode` + `string(b)` |
+| `__bufToB64(jsonNumArray)` | 同步 | JSON 字节数组 | base64 字符串 | `base64.StdEncoding.EncodeToString` |
+| `__b64ToBuf(b64)` | 同步 | base64 字符串 | ArrayBuffer | `base64.StdEncoding.DecodeString` |
+| `__urlParse(input, base)` | 同步 | URL 字符串、base 字符串 | JSON 字符串 | `net/url.Parse` + `ResolveReference` |
+| `__cryptoSubtleDigest(algo, dataB64)` | 同步 | 算法名、数据 base64 | 摘要 base64 | `crypto/sha256`、`sha512`、`sha1` |
+| `__cryptoSubtleImportKey(...)` | 同步 | format、数据、算法 JSON | keyId 或 `ERROR:msg` | 解析并存入 keyRegistry |
+| `__cryptoSubtleGenerateKey(...)` | 同步 | 算法 JSON | keyId | `crypto/rand` 生成 |
+| `__cryptoSubtleExportKey(format, keyId)` | 同步 | - | base64 或 JWK JSON | 从 keyRegistry 取出序列化 |
+| `__cryptoSubtleSign(algoJSON, keyId, dataB64)` | 同步 | - | 签名 base64 | `crypto/hmac` |
+| `__cryptoSubtleVerify(algoJSON, keyId, sigB64, dataB64)` | 同步 | - | `"true"`/`"false"` | `hmac.Equal` |
+| `__cryptoSubtleEncrypt(algoJSON, keyId, plainB64)` | 同步 | - | 密文 base64 | AES-GCM / AES-CBC |
+| `__cryptoSubtleDecrypt(algoJSON, keyId, cipherB64)` | 同步 | - | 明文 base64 | AES-GCM / AES-CBC |
 
-`__goFetchRaw` 使用 `ctx.SetAsyncFunc`——Go goroutine 完成后通过 `this.Promise().Resolve/Reject` 通知 QJS，QJS 事件循环感知 Promise 完成继续执行。
+`__goFetchRaw` 使用 `ctx.SetAsyncFunc`——Go goroutine 完成后通过 `this.Promise().Resolve/Reject`
+通知 QJS，QJS 事件循环感知 Promise 完成后继续执行。其余函数均为同步（`ctx.SetFunc`）。
 
 ---
 
-## polyfills.go — JS Polyfill 常量
+## crypto_subtle.go — Web Crypto API Go 实现
 
-### webAPIPolyfill
+### 职责
 
-**内容**：TextEncoder, TextDecoder, Headers, Request, Response
+实现 `crypto.subtle.*` 所有操作的 Go 端逻辑，注册为 `__cryptoSubtle*` host functions，
+供 `js/crypto.js` 中的薄 JS 封装层调用。
 
-**TextEncoder.encode** 实现完整 UTF-8 编码，覆盖 BMP 和补充字符（surrogate pair）。
+### Key Registry
 
-**Headers** 使用 `Object.create(null)` 存储，key 统一转小写。`getSetCookie()` 用于多值 Set-Cookie 头。
+每个 `Pool` 实例拥有独立的 key registry（`map[string]*cryptoKey`），
+密钥 ID 为随机生成的 16 字节十六进制字符串（`kXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`）。
 
-**Response.text()** 支持三种 body 类型：
-- `null` / `undefined` → `''`
-- ReadableStream（有 `getReader()`）→ `reader.read()` 循环
-- AsyncIterable（有 `Symbol.asyncIterator`）→ `for await...of` + TextDecoder
-
-### cryptoPolyfill
-
-```javascript
-globalThis.crypto = {
-  randomUUID() { /* 调用 __cryptoRandomBytes(16)，格式化为 UUID v4 */ },
-  getRandomValues(typedArray) { /* 调用 __cryptoRandomBytes(n) 填充 */ },
+```go
+type cryptoKey struct {
+    ID          string
+    Type        string    // "secret" | "public" | "private"
+    Algorithm   ckAlgo
+    Raw         []byte
+    Extractable bool
+    Usages      []string
 }
 ```
 
-依赖 `__cryptoRandomBytes` host function，确保密钥等随机值使用 OS 熵源。
+密钥不跨 Pool 共享，不持久化，进程退出后失效。
 
-### filePolyfill
+### 支持的算法
 
-先定义 `Blob`（QJS 无内置 Blob），再定义 `File extends Blob`。
-`Blob.text()` 和 `Blob.arrayBuffer()` 均为 async，返回 parts 拼接结果。
+| 操作 | 算法 | 备注 |
+|---|---|---|
+| digest | SHA-1, SHA-256, SHA-384, SHA-512 | |
+| generateKey / importKey | HMAC + SHA-256/384/512 | raw / JWK 格式 |
+| generateKey / importKey | AES-GCM 128/256 | raw 格式 |
+| generateKey / importKey | AES-CBC 128/256 | raw 格式 |
+| sign / verify | HMAC | |
+| encrypt / decrypt | AES-GCM（12 字节 nonce，16 字节 tag） | |
+| encrypt / decrypt | AES-CBC（PKCS7 padding，16 字节 IV） | |
+| exportKey | HMAC → raw / JWK；AES → raw | |
 
-### envAPIStub
+### 安全实现要点
 
-| 全局变量 | 实现说明 |
-|---|---|
-| `WebAssembly` | stub，`instantiate/compile` 返回 rejected Promise |
-| `performance` | `now()` → `Date.now()`，`timeOrigin = 0` |
-| `setTimeout` / `clearTimeout` | 用 `Promise.resolve().then(fn)` 实现 delay=0，非零 delay 也立即执行 |
-| `queueMicrotask` | `Promise.resolve().then(fn)` |
-| `btoa` / `atob` | 完整 Base64 实现 |
-| `navigator` | `userAgent: 'Node.js'` |
-| `location` | `href: 'http://localhost/'` |
-| `URL` | 完整 URL 解析，支持绝对/相对 URL，含 `searchParams` |
-| `URLSearchParams` | 完整实现，支持 `get/set/append/delete/forEach` |
+- **`newKeyID()`**：`rand.Read` 失败时返回 error，不静默忽略
+- **IV 长度验证**：AES-GCM 在 `cipher.NewGCM` 后验证 `len(iv) == gcm.NonceSize()`；
+  AES-CBC 验证 `len(iv) == aes.BlockSize`，长度不对直接返回错误，不进入 Seal/Open
+- **常量时间 PKCS7**：unpad 遍历所有 padding 字节做 XOR 累积，不提前退出，防止 padding oracle
 
-### intlStub
+---
 
-QJS 无 `Intl` API。提供 `DateTimeFormat`、`NumberFormat`、`Collator` 的最小实现：
-- `DateTimeFormat.format(d)` → `new Date(d).toISOString()`
-- `NumberFormat.format(n)` → `String(n)`
-- `Collator.compare(a, b)` → 字典序比较
+## polyfills.go — JS Polyfill 嵌入声明
 
-### structuredCloneGuard
+通过 `//go:embed` 在编译时将 `js/` 目录下的 8 个 JS 文件嵌入二进制：
 
-```javascript
-if (!globalThis.structuredClone) {
-    globalThis.structuredClone = v => JSON.parse(JSON.stringify(v));
-}
+```go
+//go:embed js/web-api.js
+var webAPIPolyfill string
+
+//go:embed js/crypto.js
+var cryptoPolyfill string
+// ... 共 8 个
 ```
 
-QuickJS-NG 内置 `structuredClone`，此处为 fallback。
-
-### consoleDef
-
-```javascript
-function fmtArg(a) {
-    if (a instanceof Error || (a.message && a.stack))
-        return `${a.name}: ${a.message}\n${a.stack}`;
-    try { return JSON.stringify(a); } catch { return String(a); }
-}
-```
-
-Error 对象特殊处理：显式提取 `name + message + stack`，避免 `JSON.stringify(error)` 返回 `{}` 导致错误信息丢失。
-
-### fetchDef
-
-```javascript
-globalThis.fetch = async function(input, init) {
-    // 构造 Headers，序列化为 {k:v} 对象
-    // 调用 __goFetchRaw(url, method, headersJSON, body)
-    // 解析返回的 JSON，构造 Response
-}
-```
+无运行时文件 I/O，JS 源码与 Go 二进制一起分发。
 
 ---
 
@@ -232,7 +227,7 @@ globalThis.__handleRequest(requestJSON: string): Promise<string>
   "url": "http://localhost:8888/products/1",
   "headers": [["accept", "text/html"], ["cookie", "user-id=abc"]],
   "body": null,
-  "context": { "ip": "127.0.0.1", "requestId": "mock-id", "geo": {...}, ... }
+  "context": { "ip": "127.0.0.1", "requestId": "mock-id", "geo": {}, ... }
 }
 ```
 
@@ -251,8 +246,8 @@ globalThis.__handleRequest(requestJSON: string): Promise<string>
 - `ip`, `requestId`
 - `geo`：`{ city, country, subdivision, timezone, longitude, latitude }`
 - `site`, `deploy`, `account`, `server`
-- 方法：`json(data)`, `log(...args)`
-- Stub（抛出错误）：`next()`, `cookies`, `params`, `rewrite()`
+- 方法：`json(data)`、`log(...args)`
+- Stub（抛出错误）：`next()`、`cookies`、`params`、`rewrite()`
 
 ---
 
@@ -266,7 +261,8 @@ func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request)
 ### 流程
 
 ```
-1. io.ReadAll(io.LimitReader(r.Body, 10MB)) → body string (非 GET/HEAD)
+1. io.ReadAll(io.LimitReader(r.Body, 10MB)) → body string（非 GET/HEAD）
+   注：空 body POST 传递 ""，不跳过
 2. 收集 r.Header → [][2]string
 3. json.Marshal(requestPayload) → payloadBytes
 4. json.Marshal(string(payloadBytes)) → JS 字符串字面量（双重编码）
@@ -276,7 +272,7 @@ func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request)
 8. w.Header().Add 写入响应头
 9. w.WriteHeader(resp.Status)
 10. fmt.Fprint(w, resp.Body)
-11. pool.Put(rt)  [defer]
+11. pool.Put(rt) [defer]
 ```
 
 双重 JSON 编码保证 payload 中含特殊字符时 JS 代码字符串仍然合法。
