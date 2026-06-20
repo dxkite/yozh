@@ -16,7 +16,7 @@
 
 ```
 integration/
-├── integration_test.go       # 集成测试（27 个测试）
+├── integration_test.go       # 集成测试（28 个测试）
 └── testdata/
     └── testapp-ssr/
         └── bundle.cjs        # 预打包 CJS（1063 KB），从 examples/testapp-ssr 生成
@@ -345,6 +345,51 @@ TestTextEncoderInto
 
 ---
 
+#### TC-28：BFF 并发 fetch（集成测试）
+
+```go
+TestBFFConcurrentFetch
+```
+**验证**：`Promise.allSettled([fetch(a), fetch(b), fetch(c)])` 真正并发执行；
+3 个各 80ms 的请求总耗时 ≤ 120ms（实测 ≈ 83ms），而非顺序执行的 240ms。
+测试在 `integration/integration_test.go`，使用内置 HTTP mock server 模拟上游服务延迟。
+
+---
+
+### 并发异步函数测试（asyncfunc_test.go）
+
+以下三个测试位于根模块（非 `integration/`），直接测试 `SetAsyncFunc` 机制。
+
+#### TC-29：单次 async 调用
+
+```go
+TestSetAsyncFuncSingle
+```
+**验证**：`SetAsyncFunc` 注册的函数被 JS `await` 调用后，goroutine 正确 resolve Promise，
+JS 得到预期返回值。
+
+---
+
+#### TC-30：多次并发 async 调用
+
+```go
+TestSetAsyncFuncConcurrent
+```
+**验证**：10 次并发 `Promise.allSettled` 调用，每次包含多个 async fetch，
+所有调用均正确 resolve，无 race condition / panic。
+
+---
+
+#### TC-31：并发耗时验证
+
+```go
+TestSetAsyncFuncTiming
+```
+**验证**：3 个各 50ms 的 async 调用，`Promise.allSettled` 总耗时 ≤ 120ms，
+确认并发而非顺序执行。
+
+---
+
 ## 测试总结
 
 | 类别 | 数量 | 状态 |
@@ -352,7 +397,8 @@ TestTextEncoderInto
 | SSR 端到端（商品列表、动态路由、购物车会话） | 8 | ✅ |
 | Polyfill 单元（TextEncoder、Headers、URL、crypto） | 11 | ✅ |
 | 回归/安全（Pool 校验、空 body、搜索参数、AES IV、padding） | 8 | ✅ |
-| **合计** | **27** | **全部通过** |
+| 并发 async（BFF 集成 + SetAsyncFunc 单元） | 4 | ✅ |
+| **合计** | **31** | **全部通过** |
 
 ---
 

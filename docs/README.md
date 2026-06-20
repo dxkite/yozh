@@ -11,7 +11,7 @@
 | [design.md](./design.md) | 整体架构、数据流、关键设计决策、依赖说明 |
 | [components.md](./components.md) | 各 Go/JS 文件的职责、接口、实现细节 |
 | [polyfills.md](./polyfills.md) | 每个 polyfill 的存在原因、边界、已知局限 |
-| [testing.md](./testing.md) | 测试环境、测试用例（27 个）、调试问题记录 |
+| [testing.md](./testing.md) | 测试环境、测试用例（31 个）、调试问题记录 |
 
 ## 快速开始
 

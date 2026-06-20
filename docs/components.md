@@ -143,8 +143,10 @@ Object.defineProperty(globalThis.process, Symbol.toStringTag, { value: 'process'
 | `__cryptoSubtleEncrypt(algoJSON, keyId, plainB64)` | 同步 | - | 密文 base64 | AES-GCM / AES-CBC |
 | `__cryptoSubtleDecrypt(algoJSON, keyId, cipherB64)` | 同步 | - | 明文 base64 | AES-GCM / AES-CBC |
 
-`__goFetchRaw` 使用 `ctx.SetAsyncFunc`——Go goroutine 完成后通过 `this.Promise().Resolve/Reject`
-通知 QJS，QJS 事件循环感知 Promise 完成后继续执行。其余函数均为同步（`ctx.SetFunc`）。
+`__goFetchRaw` 使用 `ctx.SetAsyncFunc`：goroutine 执行 HTTP 请求后将 resolve/reject 写入
+`Context.pendingCallbacks chan func()`，QJS goroutine 的 `Await()` 轮询循环在 WASM 安全的上下文中消费
+该 channel 并 resolve Promise，实现真正的并发 fetch（`Promise.allSettled` 3×80ms ≈ 83ms）。
+其余函数均为同步（`ctx.SetFunc`）。
 
 ---
 

@@ -34,7 +34,7 @@ handler.go — 序列化请求 → JSON
 runtime.go (Pool) — 从池中取出 QJS 运行时
     │
     ▼
-QJS (fastschema/qjs → QuickJS-NG via wazero)
+QJS (dxkite/qjs → QuickJS-NG via wazero)
   ├── js/         — Web API polyfills（8 个 JS 文件，//go:embed 嵌入）
   ├── bundle CJS  — Astro SSR bundle（esbuild 打包，内存加载）
   └── glue.js     — __handleRequest: JSON → Request → __ssrHandler → JSON
@@ -218,6 +218,28 @@ if invalid != 0 {
 var fetchClient = &http.Client{Timeout: 30 * time.Second}
 ```
 
+### 9. 并发 fetch via `pendingCallbacks` channel
+
+wazero 的 WASM 实例非线程安全，所有 WASM 调用必须来自同一 goroutine。
+为让 `Promise.allSettled([fetch(a), fetch(b)])` 真正并发，`__goFetchRaw` 使用 `SetAsyncFunc`：
+
+```
+JS: fetch(url)
+  → SetAsyncFunc goroutine 启动，执行 HTTP 请求（不接触 WASM）
+  → 完成后写入 Context.pendingCallbacks chan func()
+
+JS: Await() 轮询循环（在 QJS goroutine 上）：
+  drain pendingCallbacks → 调用 promise.Resolve/Reject（WASM 安全）
+  运行 QJS_ExecutePendingJob 直到返回 ≤ 0
+  检查 QJS_IsPromisePending → settled 则退出
+```
+
+`dxkite/qjs` 在上游基础上增加了：
+- `Context.pendingCallbacks chan func()`（容量 64）
+- `SetAsyncFunc(name string, fn func(*This))` / `RunAsync(promise *Value, fn func() (*Value, error))`
+- C 导出 `QJS_ExecutePendingJob` / `QJS_IsPromisePending`（`qjswasm/helpers.c`）
+- `eval.c` 中移除 `js_std_await`，由 Go 端 `Await()` 统一驱动 Promise 解析
+
 ## 数据流
 
 ```
@@ -259,7 +281,7 @@ Go HTTP Response
 
 | 依赖 | 版本 | 用途 |
 |---|---|---|
-| `github.com/fastschema/qjs` | v0.0.6 | QuickJS-NG via wazero（纯 Go，无 CGO） |
+| `github.com/dxkite/qjs` | v0.0.0-20260621001741-4363bef2dab5 | QuickJS-NG via wazero（纯 Go，无 CGO）；增加 `pendingCallbacks` channel、`SetAsyncFunc`、`RunAsync`、`QJS_ExecutePendingJob` / `QJS_IsPromisePending` WASM 导出 |
 | `github.com/tetratelabs/wazero` | v1.9.0 | WebAssembly 运行时（qjs 间接依赖） |
 | `github.com/evanw/esbuild` | v0.25.0 | in-process JS 打包 |
 
