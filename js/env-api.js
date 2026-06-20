@@ -79,13 +79,26 @@ if (!globalThis.URL) {
       this.hostname = r.hostname || '';
       this.port = r.port || '';
       this.pathname = r.pathname || '/';
-      this.search = r.search || '';
       this.hash = r.hash || '';
       this.origin = r.origin || '';
       this.href = r.href || '';
       this.username = r.username || '';
       this.password = r.password || '';
-      this.searchParams = new URLSearchParams(this.search ? this.search.slice(1) : '');
+      // search and searchParams are kept in sync via a defineProperty setter.
+      var _search = r.search || '';
+      var _searchParams = new URLSearchParams(_search ? _search.slice(1) : '');
+      Object.defineProperty(this, 'search', {
+        get: function() { return _search; },
+        set: function(v) {
+          _search = v ? (v[0] === '?' ? v : '?' + v) : '';
+          _searchParams = new URLSearchParams(_search ? _search.slice(1) : '');
+        },
+        enumerable: true, configurable: true,
+      });
+      Object.defineProperty(this, 'searchParams', {
+        get: function() { return _searchParams; },
+        enumerable: true, configurable: true,
+      });
     }
     toString() { return this.href; }
     toJSON() { return this.href; }

@@ -31,7 +31,7 @@ func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request) {
 	var bodyPtr *string
 	if r.Body != nil && r.Method != http.MethodGet && r.Method != http.MethodHead {
 		b, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
-		if err == nil && len(b) > 0 {
+		if err == nil {
 			s := string(b)
 			bodyPtr = &s
 		}

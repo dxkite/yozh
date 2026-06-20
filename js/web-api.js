@@ -9,9 +9,21 @@
       }
       encodeInto(str, dest) {
         var encoded = this.encode(str);
-        var n = Math.min(encoded.length, dest.length);
-        for (var i = 0; i < n; i++) dest[i] = encoded[i];
-        return { read: str.length, written: n };
+        if (encoded.length <= dest.length) {
+          // All bytes fit — copy everything and report all chars consumed.
+          for (var i = 0; i < encoded.length; i++) dest[i] = encoded[i];
+          return { read: str.length, written: encoded.length };
+        }
+        // Partial fit — find the last complete UTF-8 sequence boundary at or before dest.length.
+        // UTF-8 continuation bytes are 0x80–0xBF; back up past them to reach a sequence start.
+        var boundary = dest.length;
+        while (boundary > 0 && (encoded[boundary] & 0xC0) === 0x80) boundary--;
+        for (var i = 0; i < boundary; i++) dest[i] = encoded[i];
+        // Decode the written bytes to count how many JS chars (UTF-16 code units) were consumed.
+        var written = boundary;
+        var b64 = __bufToB64(JSON.stringify(Array.prototype.slice.call(encoded, 0, boundary)));
+        var decoded = __textDecodeUTF8(b64);
+        return { read: decoded.length, written: written };
       }
     };
   }
@@ -144,29 +156,40 @@
       var b = this._body;
       if (b == null) return '';
       // ReadableStream bodies (streaming=true, !isNode path)
+      // Collect all raw bytes then decode once to avoid partial multi-byte sequences.
       if (b && typeof b === 'object' && typeof b.getReader === 'function') {
         var reader = b.getReader();
-        var dec = new TextDecoder();
-        var chunks = [];
+        var allBytes = [];
         while (true) {
           var result = await reader.read();
           if (result.done) break;
-          chunks.push(typeof result.value === 'string' ? result.value : dec.decode(result.value, { stream: true }));
-        }
-        return chunks.join('');
-      }
-      // AsyncIterable bodies (Astro renderToAsyncIterable, used when isNode=true)
-      if (b && typeof b === 'object' && b[Symbol.asyncIterator] != null) {
-        var dec2 = new TextDecoder();
-        var parts = [];
-        for await (var chunk of b) {
-          if (chunk instanceof Uint8Array || ArrayBuffer.isView(chunk)) {
-            parts.push(dec2.decode(chunk, { stream: true }));
+          var chunk = result.value;
+          if (typeof chunk === 'string') {
+            var enc = new TextEncoder().encode(chunk);
+            for (var j = 0; j < enc.length; j++) allBytes.push(enc[j]);
           } else {
-            parts.push(String(chunk));
+            var u8 = (chunk instanceof Uint8Array) ? chunk : new Uint8Array(chunk.buffer || chunk, chunk.byteOffset || 0, chunk.byteLength);
+            for (var j = 0; j < u8.length; j++) allBytes.push(u8[j]);
           }
         }
-        return parts.join('');
+        if (allBytes.length === 0) return '';
+        return __textDecodeUTF8(__bufToB64(JSON.stringify(allBytes)));
+      }
+      // AsyncIterable bodies (Astro renderToAsyncIterable, used when isNode=true)
+      // Collect all raw bytes then decode once to avoid partial multi-byte sequences.
+      if (b && typeof b === 'object' && b[Symbol.asyncIterator] != null) {
+        var allBytes2 = [];
+        for await (var chunk of b) {
+          if (chunk instanceof Uint8Array || ArrayBuffer.isView(chunk)) {
+            var u8 = (chunk instanceof Uint8Array) ? chunk : new Uint8Array(chunk.buffer, chunk.byteOffset || 0, chunk.byteLength);
+            for (var j = 0; j < u8.length; j++) allBytes2.push(u8[j]);
+          } else {
+            var enc2 = new TextEncoder().encode(String(chunk));
+            for (var j = 0; j < enc2.length; j++) allBytes2.push(enc2[j]);
+          }
+        }
+        if (allBytes2.length === 0) return '';
+        return __textDecodeUTF8(__bufToB64(JSON.stringify(allBytes2)));
       }
       return String(b);
     }

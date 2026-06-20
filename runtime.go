@@ -10,10 +10,15 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 	_ "embed"
 
 	"github.com/fastschema/qjs"
 )
+
+// fetchClient is a shared HTTP client with a 30-second timeout to prevent
+// fetch() calls from hanging indefinitely and leaking goroutines.
+var fetchClient = &http.Client{Timeout: 30 * time.Second}
 
 //go:embed glue.js
 var glueJS string
@@ -29,6 +34,9 @@ type Pool struct {
 //  3. The CJS SSR bundle wrapped in a factory (sets globalThis.__ssrHandler)
 //  4. The JS glue adapter (defines globalThis.__handleRequest)
 func NewPool(bundleCode []byte, env map[string]string, size int) (*Pool, error) {
+	if size <= 0 || size > 1000 {
+		return nil, fmt.Errorf("pool size must be between 1 and 1000, got %d", size)
+	}
 	inner := qjs.NewPool(size, qjs.Option{}, func(rt *qjs.Runtime) error {
 		return setupRuntime(rt, bundleCode, env)
 	})
@@ -367,7 +375,7 @@ func goFetch(urlStr, method, headersJSON, body string) (string, error) {
 		}
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := fetchClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("fetch: %w", err)
 	}

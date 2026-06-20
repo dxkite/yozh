@@ -476,3 +476,223 @@ func TestPolyfillsQJSInit(t *testing.T) {
 		t.Fatalf("pool init failed (polyfill error): %v", err)
 	}
 }
+
+// ── Fix regression tests ──────────────────────────────────────────────────────
+
+// TestPoolSizeValidation verifies that invalid pool sizes are rejected.
+func TestPoolSizeValidation(t *testing.T) {
+	bundle := []byte(`module.exports.default = function() { return async function(req) { return new Response('ok'); }; };`)
+	cases := []struct {
+		size int
+		ok   bool
+	}{
+		{0, false},
+		{-1, false},
+		{1001, false},
+		{1, true},
+		{1000, true},
+	}
+	for _, c := range cases {
+		_, err := netlifyruntime.NewPool(bundle, map[string]string{}, c.size)
+		if c.ok && err != nil {
+			t.Errorf("size=%d: unexpected error: %v", c.size, err)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("size=%d: expected error, got nil", c.size)
+		}
+	}
+}
+
+// TestEmptyBodyPOST verifies that an explicit empty POST body is passed as ""
+// rather than null, so JS handlers can distinguish "no body" from "empty body".
+func TestEmptyBodyPOST(t *testing.T) {
+	bundle := []byte(`
+module.exports.default = function() {
+  return async function(req) {
+    var body = await req.text();
+    return new Response(JSON.stringify({body: body, bodyType: typeof body}), {
+      status: 200, headers: {'content-type': 'application/json'},
+    });
+  };
+};
+`)
+	p, err := netlifyruntime.NewPool(bundle, map[string]string{}, 1)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	w := do(t, p, "POST", "/", "", "")
+	if w.Code != 200 {
+		t.Fatalf("status %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["bodyType"] != "string" {
+		t.Errorf("empty POST body: expected string type, got %v", resp["bodyType"])
+	}
+}
+
+// TestURLSearchParamsSetter verifies that assigning url.search updates searchParams.
+func TestURLSearchParamsSetter(t *testing.T) {
+	pool := minimalPool(t, 1)
+
+	r := evalExpr(t, pool, `(function() {
+		var u = new URL('http://example.com/');
+		u.search = '?foo=bar&x=1';
+		return u.searchParams.get('foo');
+	})()`)
+	if r["result"] != "bar" {
+		t.Errorf("URL search setter: searchParams.get('foo') = %v, want 'bar'", r["result"])
+	}
+
+	r = evalExpr(t, pool, `(function() {
+		var u = new URL('http://example.com/?a=1');
+		u.search = '?b=2';
+		return u.searchParams.get('a') === null && u.searchParams.get('b') === '2';
+	})()`)
+	if r["result"] != true {
+		t.Errorf("URL search setter: old params should be gone after reassignment: %v", r["result"])
+	}
+
+	r = evalExpr(t, pool, `(function() {
+		var u = new URL('http://example.com/?q=hello');
+		u.search = '';
+		return u.searchParams.get('q');
+	})()`)
+	if r["result"] != nil {
+		t.Errorf("URL search clear: searchParams.get('q') = %v, want null", r["result"])
+	}
+}
+
+// TestAESCBC verifies AES-CBC encrypt/decrypt round-trip.
+func TestAESCBC(t *testing.T) {
+	pool := minimalPool(t, 1)
+
+	r := evalExpr(t, pool, `(async function() {
+		var key = await crypto.subtle.generateKey({name:'AES-CBC', length:256}, true, ['encrypt','decrypt']);
+		var iv = crypto.getRandomValues(new Uint8Array(16));
+		var plain = new TextEncoder().encode('AES-CBC test message');
+		var cipher = await crypto.subtle.encrypt({name:'AES-CBC', iv:iv}, key, plain);
+		var dec = await crypto.subtle.decrypt({name:'AES-CBC', iv:iv}, key, cipher);
+		return new TextDecoder().decode(dec);
+	})()`)
+	if r["result"] != "AES-CBC test message" {
+		t.Errorf("AES-CBC round-trip: got %v, want 'AES-CBC test message'", r["result"])
+	}
+}
+
+// TestAESCBCWrongIV verifies that AES-CBC rejects an IV that is not exactly 16 bytes.
+func TestAESCBCWrongIV(t *testing.T) {
+	pool := minimalPool(t, 1)
+
+	r := evalExpr(t, pool, `(async function() {
+		var key = await crypto.subtle.generateKey({name:'AES-CBC', length:256}, false, ['encrypt','decrypt']);
+		var iv12 = new Uint8Array(12);
+		try {
+			await crypto.subtle.encrypt({name:'AES-CBC', iv:iv12}, key, new TextEncoder().encode('x'));
+			return 'no error';
+		} catch(e) {
+			return e.name + ':' + (e.message.indexOf('IV') >= 0 || e.message.indexOf('16') >= 0);
+		}
+	})()`)
+	result, _ := r["result"].(string)
+	if result == "no error" || result == "" {
+		t.Errorf("AES-CBC wrong IV: expected error, got %v", r["result"])
+	}
+}
+
+// TestAESGCMWrongIV verifies that AES-GCM rejects an IV that is not exactly 12 bytes.
+func TestAESGCMWrongIV(t *testing.T) {
+	pool := minimalPool(t, 1)
+
+	r := evalExpr(t, pool, `(async function() {
+		var key = await crypto.subtle.generateKey({name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+		var iv8 = new Uint8Array(8);
+		try {
+			await crypto.subtle.encrypt({name:'AES-GCM', iv:iv8}, key, new TextEncoder().encode('x'));
+			return 'no error';
+		} catch(e) {
+			return e.name + ':' + (e.message.indexOf('IV') >= 0 || e.message.indexOf('12') >= 0);
+		}
+	})()`)
+	result, _ := r["result"].(string)
+	if result == "no error" || result == "" {
+		t.Errorf("AES-GCM wrong IV: expected error, got %v", r["result"])
+	}
+}
+
+// TestAESCBCTamperedCiphertext verifies that decryption fails when ciphertext is tampered,
+// confirming the constant-time padding validation rejects invalid input.
+func TestAESCBCTamperedCiphertext(t *testing.T) {
+	pool := minimalPool(t, 1)
+
+	// Pass a buffer of all zeros as ciphertext — decrypting random-key AES-CBC over zeros
+	// produces garbage that almost certainly fails PKCS7 padding validation.
+	r := evalExpr(t, pool, `(async function() {
+		var key = await crypto.subtle.generateKey({name:'AES-CBC', length:256}, false, ['encrypt','decrypt']);
+		var iv = new Uint8Array(16);
+		var garbage = new Uint8Array(32); // valid length, invalid content
+		try {
+			await crypto.subtle.decrypt({name:'AES-CBC', iv:iv}, key, garbage.buffer);
+			return 'no error';
+		} catch(e) {
+			return 'error';
+		}
+	})()`)
+	if r["result"] != "error" {
+		t.Errorf("AES-CBC garbage decrypt: expected error, got %v", r["result"])
+	}
+
+	// Wrong block size (not multiple of 16) must always fail.
+	r = evalExpr(t, pool, `(async function() {
+		var key = await crypto.subtle.generateKey({name:'AES-CBC', length:256}, false, ['encrypt','decrypt']);
+		var iv = new Uint8Array(16);
+		var badLen = new Uint8Array(17);
+		try {
+			await crypto.subtle.decrypt({name:'AES-CBC', iv:iv}, key, badLen.buffer);
+			return 'no error';
+		} catch(e) {
+			return 'error';
+		}
+	})()`)
+	if r["result"] != "error" {
+		t.Errorf("AES-CBC wrong-length decrypt: expected error, got %v", r["result"])
+	}
+}
+
+// TestTextEncoderInto verifies encodeInto with partial buffer and correct read/written values.
+func TestTextEncoderInto(t *testing.T) {
+	pool := minimalPool(t, 1)
+
+	// Full fit: result.written === encoded length, result.read === str.length
+	r := evalExpr(t, pool, `(function() {
+		var enc = new TextEncoder();
+		var dest = new Uint8Array(20);
+		var res = enc.encodeInto('hello', dest);
+		return res.written === 5 && res.read === 5;
+	})()`)
+	if r["result"] != true {
+		t.Errorf("encodeInto full fit: %v", r["result"])
+	}
+
+	// Partial: 3-byte UTF-8 char '中' won't fit in a 2-byte dest
+	r = evalExpr(t, pool, `(function() {
+		var enc = new TextEncoder();
+		var dest = new Uint8Array(2);
+		var res = enc.encodeInto('中', dest);
+		return res.written === 0 && res.read === 0;
+	})()`)
+	if r["result"] != true {
+		t.Errorf("encodeInto partial multi-byte: %v", r["result"])
+	}
+
+	// Partial: 'ABC中' (3 ASCII + 3 UTF-8 bytes) into 5-byte dest — only 'ABC' fits
+	r = evalExpr(t, pool, `(function() {
+		var enc = new TextEncoder();
+		var dest = new Uint8Array(5);
+		var res = enc.encodeInto('ABC中', dest);
+		return res.written === 3 && res.read === 3;
+	})()`)
+	if r["result"] != true {
+		t.Errorf("encodeInto ASCII+multibyte partial: %v", r["result"])
+	}
+}

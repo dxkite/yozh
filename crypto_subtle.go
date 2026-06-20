@@ -35,12 +35,12 @@ type cryptoKey struct {
 	Usages      []string
 }
 
-func newKeyID() string {
+func newKeyID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b) //nolint:errcheck
-	return fmt.Sprintf("k%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
-		b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-		b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15])
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("newKeyID rand.Read: %w", err)
+	}
+	return fmt.Sprintf("k%x", b), nil
 }
 
 func makeHasher(hashName string) (func() hash.Hash, error) {
@@ -108,7 +108,9 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		}
 		extractable := args[3].String() == "true"
 		var usages []string
-		json.Unmarshal([]byte(args[4].String()), &usages) //nolint:errcheck
+		if err := json.Unmarshal([]byte(args[4].String()), &usages); err != nil {
+			return errVal("invalid usages JSON: " + err.Error())
+		}
 
 		var keyBytes []byte
 		switch format {
@@ -136,7 +138,10 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			return errVal("unsupported key format: " + format)
 		}
 
-		id := newKeyID()
+		id, err := newKeyID()
+		if err != nil {
+			return errVal(err.Error())
+		}
 		keyReg[id] = &cryptoKey{
 			ID:          id,
 			Type:        "secret",
@@ -160,7 +165,9 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		}
 		extractable := args[1].String() == "true"
 		var usages []string
-		json.Unmarshal([]byte(args[2].String()), &usages) //nolint:errcheck
+		if err := json.Unmarshal([]byte(args[2].String()), &usages); err != nil {
+			return errVal("invalid usages JSON: " + err.Error())
+		}
 
 		name := strings.ToUpper(algo.Name)
 		var keyLen int
@@ -194,7 +201,10 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		if _, err := rand.Read(keyBytes); err != nil {
 			return errVal("rand: " + err.Error())
 		}
-		id := newKeyID()
+		id, err := newKeyID()
+		if err != nil {
+			return errVal(err.Error())
+		}
 		keyReg[id] = &cryptoKey{
 			ID:          id,
 			Type:        "secret",
@@ -346,7 +356,9 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			return errVal("missing arguments")
 		}
 		var algo algoSpec
-		json.Unmarshal([]byte(args[0].String()), &algo) //nolint:errcheck
+		if err := json.Unmarshal([]byte(args[0].String()), &algo); err != nil {
+			return errVal("invalid algorithm JSON: " + err.Error())
+		}
 		keyID := args[1].String()
 		plaintext, err := base64.StdEncoding.DecodeString(args[2].String())
 		if err != nil {
@@ -372,12 +384,18 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			if err != nil {
 				return errVal("GCM init: " + err.Error())
 			}
+			if len(iv) != gcm.NonceSize() {
+				return errVal(fmt.Sprintf("AES-GCM: IV must be %d bytes, got %d", gcm.NonceSize(), len(iv)))
+			}
 			ciphertext := gcm.Seal(nil, iv, plaintext, nil)
 			return ctx.NewString(base64.StdEncoding.EncodeToString(ciphertext)), nil
 		case "AES-CBC":
 			iv, err := base64.StdEncoding.DecodeString(algo.IV)
 			if err != nil {
 				return errVal("invalid IV base64: " + err.Error())
+			}
+			if len(iv) != aes.BlockSize {
+				return errVal(fmt.Sprintf("AES-CBC: IV must be %d bytes, got %d", aes.BlockSize, len(iv)))
 			}
 			block, err := aes.NewCipher(ck.Raw)
 			if err != nil {
@@ -400,7 +418,9 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			return errVal("missing arguments")
 		}
 		var algo algoSpec
-		json.Unmarshal([]byte(args[0].String()), &algo) //nolint:errcheck
+		if err := json.Unmarshal([]byte(args[0].String()), &algo); err != nil {
+			return errVal("invalid algorithm JSON: " + err.Error())
+		}
 		keyID := args[1].String()
 		ciphertext, err := base64.StdEncoding.DecodeString(args[2].String())
 		if err != nil {
@@ -426,6 +446,9 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			if err != nil {
 				return errVal("GCM init: " + err.Error())
 			}
+			if len(iv) != gcm.NonceSize() {
+				return errVal(fmt.Sprintf("AES-GCM: IV must be %d bytes, got %d", gcm.NonceSize(), len(iv)))
+			}
 			plaintext, err := gcm.Open(nil, iv, ciphertext, nil)
 			if err != nil {
 				return errVal("AES-GCM decrypt failed: " + err.Error())
@@ -435,6 +458,9 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			iv, err := base64.StdEncoding.DecodeString(algo.IV)
 			if err != nil {
 				return errVal("invalid IV base64: " + err.Error())
+			}
+			if len(iv) != aes.BlockSize {
+				return errVal(fmt.Sprintf("AES-CBC: IV must be %d bytes, got %d", aes.BlockSize, len(iv)))
 			}
 			block, err := aes.NewCipher(ck.Raw)
 			if err != nil {
@@ -471,6 +497,8 @@ func pkcs7Pad(data []byte, blockSize int) []byte {
 	return padded
 }
 
+// pkcs7Unpad removes PKCS#7 padding and validates all padding bytes in constant
+// time to prevent padding oracle attacks.
 func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 	if len(data) == 0 || len(data)%blockSize != 0 {
 		return nil, fmt.Errorf("invalid data length")
@@ -478,6 +506,14 @@ func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 	pad := int(data[len(data)-1])
 	if pad == 0 || pad > blockSize {
 		return nil, fmt.Errorf("invalid padding byte")
+	}
+	// Verify all padding bytes in constant time (no early exit).
+	var invalid byte
+	for i := len(data) - pad; i < len(data); i++ {
+		invalid |= data[i] ^ byte(pad)
+	}
+	if invalid != 0 {
+		return nil, fmt.Errorf("invalid padding")
 	}
 	return data[:len(data)-pad], nil
 }
