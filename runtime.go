@@ -7,9 +7,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/dxkite/qjs"
 )
+
+// responseMeta holds the status code and serialized headers from a JS response,
+// stored by __go_storeResponseMeta and consumed by loadAndDeleteResponseMeta.
+type responseMeta struct {
+	Status      int
+	HeadersJSON string
+}
+
+// runtimeMetas maps each *qjs.Runtime to its pending responseMeta.
+// Each runtime is exclusive per-request (Pool guarantees this), so there is
+// never a concurrent write to the same key.
+var runtimeMetas sync.Map // key: *qjs.Runtime, value: responseMeta
+
+// loadAndDeleteResponseMeta retrieves and removes the responseMeta stored for rt.
+// Returns a zero-value responseMeta if none was stored (e.g. on error paths).
+func loadAndDeleteResponseMeta(rt *qjs.Runtime) responseMeta {
+	v, _ := runtimeMetas.LoadAndDelete(rt)
+	m, _ := v.(responseMeta)
+	return m
+}
 
 //go:embed glue.js
 var glueJS string
@@ -24,6 +45,20 @@ func setupRuntime(rt *qjs.Runtime, bcs *bytecodeSet, env map[string]string) erro
 	if err := injectHostFunctions(ctx, env, keyReg); err != nil {
 		return fmt.Errorf("host functions: %w", err)
 	}
+
+	// __go_storeResponseMeta(statusCode, headersJSON) — stores the response status and
+	// headers JSON in runtimeMetas so that HandleSSR can retrieve them after Eval returns.
+	// The response body is returned directly as the __handleRequest return value,
+	// avoiding JSON.stringify({status, headers, body: "220KB"}) in glue.js (~0.5s saved).
+	ctx.SetGoFunc("__go_storeResponseMeta", func(_ context.Context, args ...any) (any, error) {
+		if len(args) < 2 {
+			return nil, nil
+		}
+		status, _ := args[0].(int64)
+		headersJSON, _ := args[1].(string)
+		runtimeMetas.Store(rt, responseMeta{Status: int(status), HeadersJSON: headersJSON})
+		return nil, nil
+	})
 
 	// 2. Evaluate polyfill bytecodes in order.
 	// crypto MUST come before the bundle: the bundle contains astro/app/node's

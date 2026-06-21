@@ -18,13 +18,6 @@ type requestPayload struct {
 	Context any         `json:"context,omitempty"`
 }
 
-// responsePayload is the JSON shape returned by the JS __handleRequest function.
-type responsePayload struct {
-	Status  int         `json:"status"`
-	Headers [][2]string `json:"headers"`
-	Body    string      `json:"body"`
-}
-
 // HandleSSR processes one HTTP request through the QJS SSR runtime.
 func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request) {
 	// Read request body (bounded to 10 MB)
@@ -64,18 +57,22 @@ func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check out a QJS runtime from the pool
+	// Check out a QJS runtime from the pool.
+	// defer order is LIFO: Put runs last (after meta is deleted) so no runtime
+	// is returned to the pool with a stale responseMeta entry.
 	rt, err := pool.Get()
 	if err != nil {
 		http.Error(w, "runtime pool exhausted", http.StatusServiceUnavailable)
 		return
 	}
 	defer pool.Put(rt)
+	defer loadAndDeleteResponseMeta(rt)
 
 	ctx := rt.Context()
 
 	// Call __handleRequest(requestJSON) with top-level await.
 	// __handleRequest is an async function; FlagAsync makes Eval block until resolved.
+	// The function stores status+headers via __go_storeResponseMeta and returns body directly.
 	code := fmt.Sprintf("await __handleRequest(%s)", string(jsLiteral))
 	resultVal, err := ctx.Eval("handle-request.js", qjs.Code(code), qjs.FlagAsync())
 	if err != nil {
@@ -84,22 +81,22 @@ func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request) {
 	}
 	defer resultVal.Free()
 
-	// Parse the JSON response from JS
-	var resp responsePayload
-	if err := json.Unmarshal([]byte(resultVal.String()), &resp); err != nil {
-		http.Error(w, fmt.Sprintf("invalid JS response: %v", err), http.StatusInternalServerError)
-		return
+	// Retrieve status and headers stored by __go_storeResponseMeta.
+	meta := loadAndDeleteResponseMeta(rt)
+	var respHeaders [][2]string
+	if meta.HeadersJSON != "" {
+		json.Unmarshal([]byte(meta.HeadersJSON), &respHeaders)
 	}
 
 	// Write response headers
-	for _, kv := range resp.Headers {
+	for _, kv := range respHeaders {
 		w.Header().Add(kv[0], kv[1])
 	}
-	w.WriteHeader(resp.Status)
+	w.WriteHeader(meta.Status)
 
-	// Write response body
-	if resp.Body != "" {
-		fmt.Fprint(w, resp.Body)
+	// Write response body (returned directly by __handleRequest, no JSON wrapper)
+	if body := resultVal.String(); body != "" {
+		fmt.Fprint(w, body)
 	}
 }
 

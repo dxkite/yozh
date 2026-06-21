@@ -81,6 +81,21 @@ func injectBinaryOps(ctx *qjs.Context) {
 		}
 		return string(b), nil
 	})
+
+	// __go_arrayBufToB64(arrayBuffer) → base64 string — zero-copy base64 encode.
+	// JS passes an ArrayBuffer directly; qjs marshals it to []byte, avoiding the
+	// JSON.stringify([N numbers]) round-trip used by __go_bufToB64.
+	ctx.SetGoFunc("__go_arrayBufToB64", func(_ context.Context, args ...any) (any, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		b, ok := args[0].([]byte)
+		if !ok {
+			s, _ := args[0].(string)
+			return s, nil
+		}
+		return base64.StdEncoding.EncodeToString(b), nil
+	})
 }
 
 // injectURLParser registers __go_urlParse for WHATWG-compliant URL parsing via net/url.
