@@ -14,6 +14,9 @@ import (
 //  3. Fallback → SSR handler (QJS)
 func StartServer(pool *Pool, distDir, addr string) error {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/.netlify/images", func(w http.ResponseWriter, r *http.Request) {
+		HandleImageCDN(distDir, w, r)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		urlPath := filepath.Clean(r.URL.Path)
 		if served := tryStatic(w, r, distDir, urlPath); served {
