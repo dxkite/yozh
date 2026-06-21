@@ -1,3 +1,41 @@
+// Patch Error.stack to include name+message prefix (QJS omits it unlike V8).
+// Without this, Astro's logger logs `err.stack` and the error message is invisible.
+(function() {
+  var origError = Error;
+  var props = ['EvalError','RangeError','ReferenceError','SyntaxError','TypeError','URIError'];
+  function patchStack(err) {
+    try {
+      var msg = (err.name || 'Error') + ': ' + (err.message || '');
+      if (err.stack && typeof err.stack === 'string' && err.stack.indexOf(msg) < 0) {
+        Object.defineProperty(err, 'stack', { value: msg + '\n' + err.stack, configurable: true, writable: true });
+      }
+    } catch(e) {}
+    return err;
+  }
+  // Override global Error constructor
+  function PatchedError(message) {
+    var err = new origError(message);
+    return patchStack(err);
+  }
+  PatchedError.prototype = origError.prototype;
+  PatchedError.captureStackTrace = origError.captureStackTrace;
+  globalThis.Error = PatchedError;
+  for (var i = 0; i < props.length; i++) {
+    var name = props[i];
+    if (globalThis[name]) {
+      var orig = globalThis[name];
+      (function(orig, name) {
+        function PatchedSubError(message) {
+          var err = new orig(message);
+          return patchStack(err);
+        }
+        PatchedSubError.prototype = orig.prototype;
+        globalThis[name] = PatchedSubError;
+      })(orig, name);
+    }
+  }
+})();
+
 globalThis.console = (function() {
   function fmtArg(a) {
     if (a === null) return 'null';

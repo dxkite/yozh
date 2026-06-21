@@ -41,6 +41,8 @@ var shimSpecToFile = map[string]string{
 	"node:fs/promises": "node-fs.js",
 	"node:http2":      "node-http2.js",
 	"http2":           "node-http2.js",
+	"node:tty":        "node-tty.js",
+	"tty":             "node-tty.js",
 }
 
 // nodeShims maps each intercepted specifier to its pre-loaded stub code.
@@ -127,7 +129,7 @@ func nodeShimPlugin() api.Plugin {
 		Setup: func(build api.PluginBuild) {
 			// Match node: protocol prefix and bare Node.js built-in names only.
 			build.OnResolve(api.OnResolveOptions{
-				Filter: `^(node:|process$|fs$|fs/|path$|path/|url$|crypto$|buffer$|stream$|http$|https$|http2$|os$|async_hooks$|worker_threads$|perf_hooks$|events$|util$|assert$|net$|tls$|zlib$|child_process$|dns$|dgram$|readline$)`,
+				Filter: `^(node:|process$|fs$|fs/|path$|path/|url$|crypto$|buffer$|stream$|http$|https$|http2$|os$|async_hooks$|worker_threads$|perf_hooks$|events$|util$|assert$|net$|tls$|tty$|zlib$|child_process$|dns$|dgram$|readline$)`,
 			}, func(args api.OnResolveArgs) (api.OnResolveResult, error) {
 				return api.OnResolveResult{Path: args.Path, Namespace: "node-shim"}, nil
 			})

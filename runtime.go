@@ -14,9 +14,9 @@ import (
 //go:embed glue.js
 var glueJS string
 
-// setupRuntime initializes a single QJS runtime.
+// setupRuntime initializes a single QJS runtime using pre-compiled bytecodes.
 // Order is critical: host functions → polyfills → ESM bundle → handler setup → glue.
-func setupRuntime(rt *qjs.Runtime, bundleCode []byte, env map[string]string) error {
+func setupRuntime(rt *qjs.Runtime, bcs *bytecodeSet, env map[string]string) error {
 	ctx := rt.Context()
 	keyReg := make(map[string]*cryptoKey)
 
@@ -25,32 +25,21 @@ func setupRuntime(rt *qjs.Runtime, bundleCode []byte, env map[string]string) err
 		return fmt.Errorf("host functions: %w", err)
 	}
 
-	// 2. Evaluate polyfills in order.
+	// 2. Evaluate polyfill bytecodes in order.
 	// crypto MUST come before the bundle: the bundle contains astro/app/node's
 	// applyPolyfills(), which checks `if (!globalThis.crypto)`. By pre-setting it,
 	// the check is skipped and our mock crypto is not overwritten with a broken shim.
-	for _, step := range []struct{ name, code string }{
-		{"web-api-polyfill.js", webAPIPolyfill},
-		{"crypto-polyfill.js", cryptoPolyfill},
-		{"file-polyfill.js", filePolyfill},
-		{"env-api-stub.js", envAPIStub},
-		{"intl-stub.js", intlStub},
-		{"structured-clone.js", structuredCloneGuard},
-		{"console.js", consoleDef},
-		{"fetch.js", fetchDef},
-	} {
-		v, err := ctx.Eval(step.name, qjs.Code(step.code))
+	for _, step := range bcs.polyfills {
+		v, err := ctx.Eval(step.name, qjs.Bytecode(step.bc))
 		if err != nil {
 			return fmt.Errorf("polyfill %s: %w", step.name, err)
 		}
 		v.Free()
 	}
 
-	// 3. Evaluate the ESM bundle in module mode (TypeModule).
-	// TypeModule enables native top-level await (ES2023) and returns the default export.
-	// All Node builtins and external packages are inlined as stubs by the esbuild
-	// nodeShimPlugin, so the bundle has no external imports and is fully self-contained.
-	factory, err := ctx.Eval("ssr.mjs", qjs.Code(string(bundleCode)), qjs.TypeModule())
+	// 3. Evaluate the pre-compiled ESM bundle bytecode in module mode.
+	// The bundle has no external imports (all Node builtins inlined by esbuild).
+	factory, err := ctx.Eval("ssr.mjs", qjs.Bytecode(bcs.bundle), qjs.TypeModule())
 	if err != nil {
 		return fmt.Errorf("bundle eval: %w", err)
 	}
@@ -76,8 +65,8 @@ func setupRuntime(rt *qjs.Runtime, bundleCode []byte, env map[string]string) err
 	}
 	v.Free()
 
-	// 5. Evaluate glue adapter — defines globalThis.__handleRequest
-	v, err = ctx.Eval("glue.js", qjs.Code(glueJS))
+	// 5. Evaluate glue adapter bytecode — defines globalThis.__handleRequest
+	v, err = ctx.Eval("glue.js", qjs.Bytecode(bcs.glue))
 	if err != nil {
 		return fmt.Errorf("glue eval: %w", err)
 	}

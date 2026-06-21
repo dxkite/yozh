@@ -2,6 +2,7 @@ package astroruntime
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/dxkite/qjs"
 )
@@ -16,15 +17,32 @@ type Pool struct {
 //  2. Web API polyfills (Headers, Request, Response, crypto, File, console, fetch)
 //  3. The ESM SSR bundle loaded in module mode (sets globalThis.__ssrHandler)
 //  4. The JS glue adapter (defines globalThis.__handleRequest)
+//
+// JS source is compiled to QuickJS bytecode on the first pool worker's runtime context
+// (via sync.Once), so no extra WASM runtime is created. All subsequent workers reuse the
+// same bytecodes, avoiding redundant parsing.
 func NewPool(bundleCode []byte, env map[string]string, size int) (*Pool, error) {
 	if size <= 0 || size > 1000 {
 		return nil, fmt.Errorf("pool size must be between 1 and 1000, got %d", size)
 	}
+
+	var (
+		once    sync.Once
+		bcs     *bytecodeSet
+		compErr error
+	)
+
 	inner := qjs.NewPool(size, qjs.Option{}, func(rt *qjs.Runtime) error {
-		return setupRuntime(rt, bundleCode, env)
+		once.Do(func() {
+			bcs, compErr = compileBytecodes(rt.Context(), bundleCode)
+		})
+		if compErr != nil {
+			return fmt.Errorf("compile bytecodes: %w", compErr)
+		}
+		return setupRuntime(rt, bcs, env)
 	})
 
-	// Eagerly warm one slot to surface initialization errors at startup.
+	// Eagerly warm one slot: triggers bytecode compilation and surfaces errors at startup.
 	rt, err := inner.Get()
 	if err != nil {
 		return nil, fmt.Errorf("pool warm-up: %w", err)
