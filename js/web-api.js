@@ -221,4 +221,160 @@
   globalThis.Headers  = Headers;
   globalThis.Request  = Request;
   globalThis.Response = Response;
+
+  // ── setImmediate / clearImmediate ──────────────────────────────────────────
+  // react-dom-server.node uses setImmediate(fn) to schedule async rendering
+  // work. QuickJS doesn't provide it natively — emulate via Promise microtask.
+  if (!globalThis.setImmediate) {
+    globalThis.setImmediate = function(fn) {
+      var args = Array.prototype.slice.call(arguments, 1);
+      Promise.resolve().then(function() { fn.apply(null, args); });
+      return 0;
+    };
+    globalThis.clearImmediate = function() {};
+  }
+
+  // ── Buffer ─────────────────────────────────────────────────────────────────
+  // react-dom-server.node uses Buffer.byteLength(str,'utf8') to measure chunk
+  // sizes, and Buffer.from() for encoding. Provide a minimal global shim so
+  // react-dom can run without requiring the Node.js Buffer module globally.
+  if (!globalThis.Buffer) {
+    globalThis.Buffer = {
+      byteLength: function(str, enc) {
+        if (typeof str === 'string') return new TextEncoder().encode(str).byteLength;
+        if (str && str.byteLength !== undefined) return str.byteLength;
+        return str ? (str.length || 0) : 0;
+      },
+      from: function(data, enc) {
+        if (typeof data === 'string') return new TextEncoder().encode(data);
+        return new Uint8Array(data);
+      },
+      alloc: function(n) { return new Uint8Array(n); },
+      isBuffer: function(v) { return false; },
+      concat: function(bufs) {
+        var total = 0;
+        for (var i = 0; i < bufs.length; i++) total += bufs[i].length;
+        var out = new Uint8Array(total);
+        var off = 0;
+        for (var i = 0; i < bufs.length; i++) { out.set(bufs[i], off); off += bufs[i].length; }
+        return out;
+      }
+    };
+  }
+
+  // ── ReadableStream ──────────────────────────────────────────────────────────
+  // react-dom's renderToReadableStream creates a ReadableStream to stream HTML.
+  // Provide a minimal WHATWG-compatible implementation with push queue + pull
+  // callbacks so react-dom can enqueue chunks asynchronously while our
+  // Response.text() reader drains them via reader.read().
+  if (!globalThis.ReadableStream) {
+    globalThis.ReadableStream = (function() {
+      function ReadableStream(underlyingSource) {
+        var self = this;
+        self._queue   = [];
+        self._done    = false;
+        self._error   = null;
+        self._waiters = [];
+        self._source  = underlyingSource || {};
+
+        var ctrl = {
+          enqueue: function(chunk) {
+            if (self._waiters.length > 0) {
+              var w = self._waiters.shift();
+              w.resolve({ value: chunk, done: false });
+            } else {
+              self._queue.push(chunk);
+            }
+          },
+          close: function() {
+            self._done = true;
+            while (self._waiters.length > 0) {
+              var w = self._waiters.shift();
+              w.resolve({ value: undefined, done: true });
+            }
+          },
+          error: function(e) {
+            self._error = e;
+            while (self._waiters.length > 0) {
+              var w = self._waiters.shift();
+              w.reject(e);
+            }
+          },
+          get desiredSize() { return self._queue.length === 0 ? 1 : 0; }
+        };
+        self._controller = ctrl;
+
+        if (typeof self._source.start === 'function') {
+          try {
+            var r = self._source.start(ctrl);
+            if (r && typeof r.then === 'function') r.catch(function(e) { ctrl.error(e); });
+          } catch(e) { ctrl.error(e); }
+        }
+      }
+
+      ReadableStream.prototype.getReader = function() {
+        var self = this;
+        var pullPending = false;
+
+        function schedulePull() {
+          if (pullPending || typeof self._source.pull !== 'function') return;
+          if (self._queue.length > 0 || self._done || self._error) return;
+          pullPending = true;
+          Promise.resolve().then(function() {
+            pullPending = false;
+            if (self._queue.length === 0 && !self._done && !self._error) {
+              try {
+                var r = self._source.pull(self._controller);
+                if (r && typeof r.then === 'function') r.catch(function(e) { self._controller.error(e); });
+              } catch(e) { self._controller.error(e); }
+            }
+          });
+        }
+
+        return {
+          read: function() {
+            if (self._error) return Promise.reject(self._error);
+            if (self._queue.length > 0) return Promise.resolve({ value: self._queue.shift(), done: false });
+            if (self._done) return Promise.resolve({ value: undefined, done: true });
+            schedulePull();
+            return new Promise(function(resolve, reject) {
+              self._waiters.push({ resolve: resolve, reject: reject });
+            });
+          },
+          releaseLock: function() {},
+          cancel: function(reason) {
+            if (typeof self._source.cancel === 'function') {
+              try { self._source.cancel(reason); } catch(e) {}
+            }
+            return Promise.resolve();
+          }
+        };
+      };
+
+      ReadableStream.prototype[Symbol.asyncIterator] = function() {
+        var reader = this.getReader();
+        return {
+          next: function() { return reader.read(); },
+          return: function() { reader.releaseLock(); return Promise.resolve({ value: undefined, done: true }); }
+        };
+      };
+
+      ReadableStream.from = function(iterable) {
+        if (iterable && typeof iterable[Symbol.asyncIterator] === 'function') {
+          var iter = iterable[Symbol.asyncIterator]();
+          return new ReadableStream({
+            pull: function(controller) {
+              return iter.next().then(function(result) {
+                if (result.done) controller.close();
+                else controller.enqueue(result.value);
+              });
+            }
+          });
+        }
+        return new ReadableStream({ start: function(c) { c.close(); } });
+      };
+
+      return ReadableStream;
+    })();
+  }
 })();

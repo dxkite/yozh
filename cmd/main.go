@@ -13,7 +13,7 @@ import (
 
 func main() {
 	port    := flag.Int("port", 8888, "port to listen on")
-	ssrPath := flag.String("ssr", ".netlify/v1/functions/ssr/ssr.mjs", "path to built SSR entry .mjs")
+	ssrPath := flag.String("ssr", ".netlify/build/entry.mjs", "path to built SSR entry .mjs")
 	distDir := flag.String("dist", "dist", "path to Astro's built static output directory")
 	flag.Parse()
 
@@ -35,7 +35,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("bundle: %v", err)
 	}
-	log.Printf("Bundle ready (%d KB)", len(bundleCode)/1024)
+	log.Printf("Bundle ready (%d bytes / %d KB)", len(bundleCode), len(bundleCode)/1024)
+	if len(bundleCode) < 10000 {
+		log.Printf("Bundle content (small, dumping): %s", string(bundleCode))
+	}
 
 	poolSize := runtime.NumCPU()
 	if poolSize < 2 {

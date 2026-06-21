@@ -24,9 +24,6 @@ var fetchClient = &http.Client{Timeout: 30 * time.Second}
 //go:embed glue.js
 var glueJS string
 
-//go:embed js/bundle-wrapper.js
-var bundleWrapperJS string
-
 // Pool wraps a QJS runtime pool pre-warmed with polyfills and the SSR bundle.
 type Pool struct {
 	inner *qjs.Pool
@@ -35,7 +32,7 @@ type Pool struct {
 // NewPool creates `size` QJS runtimes, each initialized with:
 //  1. Go host functions (__go_cryptoRandomBytes, __go_consoleWrite, __go_fetchRaw)
 //  2. Web API polyfills (Headers, Request, Response, crypto, File, console, fetch)
-//  3. The CJS SSR bundle wrapped in a factory (sets globalThis.__ssrHandler)
+//  3. The ESM SSR bundle loaded in module mode (sets globalThis.__ssrHandler)
 //  4. The JS glue adapter (defines globalThis.__handleRequest)
 func NewPool(bundleCode []byte, env map[string]string, size int) (*Pool, error) {
 	if size <= 0 || size > 1000 {
@@ -65,7 +62,7 @@ func (p *Pool) Put(rt *qjs.Runtime) { p.inner.Put(rt) }
 func (p *Pool) Close() {}
 
 // setupRuntime initializes a single QJS runtime.
-// Order is critical: host functions → polyfills → bundle → glue.
+// Order is critical: host functions → polyfills → ESM bundle → handler setup → glue.
 func setupRuntime(rt *qjs.Runtime, bundleCode []byte, env map[string]string) error {
 	ctx := rt.Context()
 	keyReg := make(map[string]*cryptoKey)
@@ -75,7 +72,7 @@ func setupRuntime(rt *qjs.Runtime, bundleCode []byte, env map[string]string) err
 		return fmt.Errorf("host functions: %w", err)
 	}
 
-	// 2. Evaluate polyfills in order
+	// 2. Evaluate polyfills in order.
 	// crypto MUST come before the bundle: the bundle contains astro/app/node's
 	// applyPolyfills(), which checks `if (!globalThis.crypto)`. By pre-setting it,
 	// the check is skipped and our mock crypto is not overwritten with a broken shim.
@@ -96,18 +93,37 @@ func setupRuntime(rt *qjs.Runtime, bundleCode []byte, env map[string]string) err
 		v.Free()
 	}
 
-	// 3. Evaluate the CJS bundle wrapped in a factory.
-	// bundleWrapperJS (js/bundle-wrapper.js) contains the require shim and handler
-	// detection logic; __BUNDLE_CODE__ is replaced with the actual bundle bytes.
-	wrapped := strings.Replace(bundleWrapperJS, "__BUNDLE_CODE__", string(bundleCode), 1)
-
-	v, err := ctx.Eval("ssr-bundle.js", qjs.Code(wrapped))
+	// 3. Evaluate the ESM bundle in module mode (TypeModule).
+	// TypeModule enables native top-level await (ES2023) and returns the default export.
+	// All Node builtins and external packages are inlined as stubs by the esbuild
+	// nodeShimPlugin, so the bundle has no external imports and is fully self-contained.
+	factory, err := ctx.Eval("ssr.mjs", qjs.Code(string(bundleCode)), qjs.TypeModule())
 	if err != nil {
 		return fmt.Errorf("bundle eval: %w", err)
 	}
+
+	// 4. Extract the SSR handler from the module's default export.
+	// The default export is the handler (length>=2) or a factory (length<2) that returns
+	// the handler when called with an empty config object.
+	ctx.Global().SetPropertyStr("__ssrHandlerFactory", factory)
+	factory.Free()
+
+	v, err := ctx.Eval("setup-handler.js", qjs.Code(`(function() {
+  var raw = globalThis.__ssrHandlerFactory;
+  if (typeof raw === 'function' && raw.length < 2) {
+    var candidate = raw({});
+    globalThis.__ssrHandler = (typeof candidate === 'function') ? candidate : raw;
+  } else {
+    globalThis.__ssrHandler = raw;
+  }
+  delete globalThis.__ssrHandlerFactory;
+})()`))
+	if err != nil {
+		return fmt.Errorf("handler setup: %w", err)
+	}
 	v.Free()
 
-	// 4. Evaluate glue adapter — defines globalThis.__handleRequest
+	// 5. Evaluate glue adapter — defines globalThis.__handleRequest
 	v, err = ctx.Eval("glue.js", qjs.Code(glueJS))
 	if err != nil {
 		return fmt.Errorf("glue eval: %w", err)
