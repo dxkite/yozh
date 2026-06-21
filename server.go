@@ -3,6 +3,7 @@ package astroruntime
 import (
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -18,8 +19,11 @@ func StartServer(pool *Pool, distDir, addr string) error {
 		HandleImageCDN(distDir, w, r)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		urlPath := filepath.Clean(r.URL.Path)
-		if served := tryStatic(w, r, distDir, urlPath); served {
+		// path.Clean keeps forward slashes (safe on all OS); strip leading slash
+		// so filepath.Join treats it as relative and never overrides distDir.
+		urlPath := path.Clean(r.URL.Path)
+		rel := strings.TrimLeft(urlPath, "/")
+		if served := tryStatic(w, r, distDir, rel, urlPath); served {
 			return
 		}
 		HandleSSR(pool, w, r)
@@ -28,10 +32,13 @@ func StartServer(pool *Pool, distDir, addr string) error {
 }
 
 // tryStatic attempts to serve a static file from distDir.
+// rel is the URL path with leading slash stripped (so filepath.Join stays inside distDir).
+// urlPath is the original /‑prefixed URL path (used for Cache-Control decisions).
 // Returns true if a file was found and served.
-func tryStatic(w http.ResponseWriter, r *http.Request, distDir, urlPath string) bool {
+func tryStatic(w http.ResponseWriter, r *http.Request, distDir, rel, urlPath string) bool {
+	candidate := filepath.Join(distDir, filepath.FromSlash(rel))
+
 	// Direct file match
-	candidate := filepath.Join(distDir, filepath.FromSlash(urlPath))
 	if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
 		serveStatic(w, r, candidate, urlPath)
 		return true

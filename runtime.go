@@ -24,6 +24,9 @@ var fetchClient = &http.Client{Timeout: 30 * time.Second}
 //go:embed glue.js
 var glueJS string
 
+//go:embed js/bundle-wrapper.js
+var bundleWrapperJS string
+
 // Pool wraps a QJS runtime pool pre-warmed with polyfills and the SSR bundle.
 type Pool struct {
 	inner *qjs.Pool
@@ -94,36 +97,9 @@ func setupRuntime(rt *qjs.Runtime, bundleCode []byte, env map[string]string) err
 	}
 
 	// 3. Evaluate the CJS bundle wrapped in a factory.
-	// esbuild produces: `exports.default = createSSRHandler({...})` at the end.
-	// We extract module.exports.default into globalThis.__ssrHandler, which is
-	// the already-bound `async handler(request, context)` function.
-	wrapped := fmt.Sprintf(`var __ssrHandler = (function(module, exports) {
-  var require = function(id) {
-    if (id === 'process' || id === 'node:process')
-      return { env: __processEnv };
-    if (id === 'node:crypto' || id === 'crypto')
-      return { webcrypto: globalThis.crypto };
-    if (id === 'node:buffer' || id === 'buffer')
-      return { File: globalThis.File };
-    if (id === 'node:path' || id === 'path')
-      return {
-        join: function() { return Array.prototype.slice.call(arguments).join('/'); },
-        resolve: function(p) { return p; },
-        dirname: function(p) { return p.split('/').slice(0,-1).join('/'); },
-        basename: function(p) { return p.split('/').pop(); },
-      };
-    // node:stream/web must throw so the bundle activates its bundled web-streams-polyfill fallback.
-    // The bundle does: try { Object.assign(globalThis, require('node:stream/web')) } catch { usePolyfill() }
-    if (id === 'node:stream/web' || id === 'stream/web') throw new Error(id + ' not available in QJS');
-    return {};
-  };
-  %s
-  // The Netlify adapter's createExports() returns { default: createHandler }
-  // where createHandler(integrationConfig) is a factory that returns the actual
-  // async handler(request, context) function. Call it with {} to get the handler.
-  var __rawExport = module.exports.default || module.exports;
-  return typeof __rawExport === 'function' ? __rawExport({}) : __rawExport;
-}({ exports: {} }, {}));`, string(bundleCode))
+	// bundleWrapperJS (js/bundle-wrapper.js) contains the require shim and handler
+	// detection logic; __BUNDLE_CODE__ is replaced with the actual bundle bytes.
+	wrapped := strings.Replace(bundleWrapperJS, "__BUNDLE_CODE__", string(bundleCode), 1)
 
 	v, err := ctx.Eval("ssr-bundle.js", qjs.Code(wrapped))
 	if err != nil {
