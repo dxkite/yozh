@@ -86,6 +86,9 @@
 
     var body = await response.text();
 
+    // PERF: JSON.stringify serializes the full body string (~220KB for a typical page)
+    // inside a JSON object. In QJS without JIT this costs ~0.5s. A future improvement
+    // is to pass body separately via a Go host function to skip this serialization.
     return JSON.stringify({
       status:  response.status,
       headers: respHeaders,

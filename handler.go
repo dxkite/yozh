@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/dxkite/qjs"
 )
@@ -25,8 +27,67 @@ type responsePayload struct {
 	Body    string      `json:"body"`
 }
 
+// cachedResponse holds a rendered SSR response for reuse across requests.
+type cachedResponse struct {
+	status  int
+	headers [][2]string
+	body    string
+	at      time.Time
+}
+
+// ssrCache caches GET responses by URL path+query. Only 2xx responses are cached.
+// TTL is 60 s; cache is evicted lazily on the next read of that key.
+//
+// PERF: QuickJS has no JIT — React SSR costs ~3.5s per page on a typical machine
+// (vs ~50ms in V8). This cache is the primary mitigation: first request is slow,
+// subsequent requests return in <10ms without touching QJS at all.
+var (
+	ssrCacheMu  sync.RWMutex
+	ssrCache    = make(map[string]*cachedResponse)
+	ssrCacheTTL = 60 * time.Second
+)
+
+func cacheGet(key string) *cachedResponse {
+	ssrCacheMu.RLock()
+	e := ssrCache[key]
+	ssrCacheMu.RUnlock()
+	if e == nil {
+		return nil
+	}
+	if time.Since(e.at) > ssrCacheTTL {
+		ssrCacheMu.Lock()
+		delete(ssrCache, key)
+		ssrCacheMu.Unlock()
+		return nil
+	}
+	return e
+}
+
+func cachePut(key string, e *cachedResponse) {
+	ssrCacheMu.Lock()
+	ssrCache[key] = e
+	ssrCacheMu.Unlock()
+}
+
 // HandleSSR processes one HTTP request through the QJS SSR runtime.
 func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request) {
+	// Only cache safe, idempotent GET/HEAD requests with no body.
+	cacheKey := ""
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		cacheKey = r.URL.RequestURI()
+		if hit := cacheGet(cacheKey); hit != nil {
+			for _, kv := range hit.headers {
+				w.Header().Add(kv[0], kv[1])
+			}
+			w.Header().Set("X-Cache", "HIT")
+			w.WriteHeader(hit.status)
+			if r.Method != http.MethodHead && hit.body != "" {
+				fmt.Fprint(w, hit.body)
+			}
+			return
+		}
+	}
+
 	// Read request body (bounded to 10 MB)
 	var bodyPtr *string
 	if r.Body != nil && r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -89,6 +150,16 @@ func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal([]byte(resultVal.String()), &resp); err != nil {
 		http.Error(w, fmt.Sprintf("invalid JS response: %v", err), http.StatusInternalServerError)
 		return
+	}
+
+	// Store in cache for GET/HEAD 2xx responses
+	if cacheKey != "" && resp.Status >= 200 && resp.Status < 300 {
+		cachePut(cacheKey, &cachedResponse{
+			status:  resp.Status,
+			headers: resp.Headers,
+			body:    resp.Body,
+			at:      time.Now(),
+		})
 	}
 
 	// Write response headers
