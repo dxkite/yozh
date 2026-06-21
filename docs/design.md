@@ -25,22 +25,25 @@ Netlify 平台在运行时提供 Node.js 环境并注入 `Context` 对象。本�
 HTTP 请求
     │
     ▼
-server.go — 静态文件优先路由（Netlify preferStatic 模拟）
-    │ (未命中静态文件)
-    ▼
-handler.go — 序列化请求 → JSON
+server.go — 路由分发
+    ├─ /.netlify/images?... → images.go (HandleImageCDN)
+    │      resize/crop → encode JPEG/PNG（AVIF 源直接 ServeFile）
     │
-    ▼
-runtime.go (Pool) — 从池中取出 QJS 运行时
+    ├─ 静态文件命中 → http.ServeFile（distDir）
     │
-    ▼
-QJS (dxkite/qjs → QuickJS-NG via wazero)
-  ├── js/         — Web API polyfills（8 个 JS 文件，//go:embed 嵌入）
-  ├── bundle CJS  — Astro SSR bundle（esbuild 打包，内存加载）
-  └── glue.js     — __handleRequest: JSON → Request → __ssrHandler → JSON
-    │
-    ▼
-Go: 解析 JSON 响应 → 写入 HTTP 响应
+    └─ 未命中 → handler.go — 序列化请求 → JSON
+                    │
+                    ▼
+               runtime.go (Pool) — 从池中取出 QJS 运行时
+                    │
+                    ▼
+               QJS (dxkite/qjs → QuickJS-NG via wazero)
+                 ├── js/         — Web API polyfills（8 个 JS 文件，//go:embed 嵌入）
+                 ├── bundle CJS  — Astro SSR bundle（esbuild 打包，内存加载）
+                 └── glue.js     — __handleRequest: JSON → Request → __ssrHandler → JSON
+                    │
+                    ▼
+               Go: 解析 JSON 响应 → 写入 HTTP 响应
 ```
 
 ## 核心组件
@@ -54,7 +57,8 @@ Go: 解析 JSON 响应 → 写入 HTTP 响应
 | `crypto_subtle.go` | Web Crypto API Go 实现（digest、HMAC、AES-GCM/CBC、JWK 导入导出） |
 | `glue.js` | Go↔QJS 桥接，定义 `globalThis.__handleRequest` |
 | `handler.go` | 单次请求处理：序列化、调用 QJS、反序列化 |
-| `server.go` | HTTP 路由：静态文件优先，fallback SSR |
+| `images.go` | `/.netlify/images` 图像 CDN：参数解析、解码、resize/crop、编码 |
+| `server.go` | HTTP 路由：图像 CDN → 静态文件 → SSR fallback |
 
 ## QJS 运行时初始化顺序
 
@@ -267,6 +271,23 @@ Go: json.Unmarshal → responsePayload
 Go HTTP Response
 ```
 
+### 10. 图像 CDN：AVIF 降级与 WebP 输出策略
+
+`@astrojs/netlify` 的 `image-service.js` 将所有 `<Image />` URL 改写为
+`/.netlify/images?url=...&fm=...&w=...&h=...&q=...&fit=...`。
+
+**AVIF 源文件**：Go 标准库及 `golang.org/x/image` 均无 AVIF 解码器（需 CGO + libavif）。
+对 AVIF 源走 `http.ServeFile` fallback，直接输出原始文件，忽略变换参数。
+现代浏览器原生支持 AVIF，页面图片正常显示；仅失去精确尺寸裁剪能力，本地开发可接受。
+
+**WebP/AVIF 输出格式**：`golang.org/x/image/webp` 仅提供解码器，无编码器。
+当 `fm=webp` 或 `fm=avif` 时降级输出 JPEG，`Content-Type: image/jpeg`。
+浏览器按实际 MIME 类型渲染，不影响显示；只是格式与请求不符，在开发环境可接受。
+
+如需完整 AVIF 支持，可后续集成 CGO 版 `libavif` 或 shell out 到 `sharp`（Firefly 已内置该依赖）。
+
+---
+
 ## 限制与已知问题
 
 | 项目 | 说明 |
@@ -276,6 +297,8 @@ Go HTTP Response
 | WebAssembly | QJS 中 WebAssembly stub 永远返回不支持 |
 | setTimeout 精度 | 非零 delay 的 setTimeout 立即执行（用 microtask 模拟），SSR 路径通常无影响 |
 | 二进制响应 | Response body 为字符串，图片/PDF 等二进制资源应走静态文件路由，不经 SSR |
+| 图像 AVIF 变换 | AVIF 源文件无法解码（无纯 Go 实现），直接 ServeFile 原始文件，不执行 resize/crop |
+| 图像 WebP 输出 | `fm=webp`/`fm=avif` 请求降级为 JPEG 输出，格式与请求不符 |
 
 ## 依赖说明
 
@@ -284,6 +307,7 @@ Go HTTP Response
 | `github.com/dxkite/qjs` | v0.0.0-20260621001741-4363bef2dab5 | QuickJS-NG via wazero（纯 Go，无 CGO）；增加 `pendingCallbacks` channel、`SetAsyncFunc`、`RunAsync`、`QJS_ExecutePendingJob` / `QJS_IsPromisePending` WASM 导出 |
 | `github.com/tetratelabs/wazero` | v1.9.0 | WebAssembly 运行时（qjs 间接依赖） |
 | `github.com/evanw/esbuild` | v0.25.0 | in-process JS 打包 |
+| `golang.org/x/image` | v0.43.0 | WebP 图像解码（`webp` 子包）；`draw.BiLinear` 双线性缩放（`draw` 子包） |
 
 ## CLI 使用方式
 

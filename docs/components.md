@@ -281,6 +281,75 @@ func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request)
 
 ---
 
+## images.go — Netlify 图像 CDN
+
+### 职责
+
+模拟 Netlify 的 `/.netlify/images` 图像转换端点。`@astrojs/netlify` 适配器通过
+`image-service.js` 将所有 `<Image />` 组件的 URL 改写为此格式，生产环境由 Netlify
+内置图像 CDN 处理；本模块在本地开发/私有部署时提供等效实现。
+
+### 入口函数
+
+```go
+func HandleImageCDN(distDir string, w http.ResponseWriter, r *http.Request)
+```
+
+### 参数规范
+
+| 参数 | 说明 | 备注 |
+|------|------|------|
+| `url` | 源图像路径（相对）或绝对 URL | 相对路径不含前导 `/`（image-service.js 的 `removeLeadingForwardSlash` 处理） |
+| `fm` | 输出格式：`avif`, `jpg`, `png`, `webp` | 不支持的编码格式降级为 JPEG |
+| `w` | 目标宽度（像素） | 为 0 时按 h 等比推算 |
+| `h` | 目标高度（像素） | 为 0 时按 w 等比推算 |
+| `q` | 质量 1–100 | 缺省 75 |
+| `fit` | 裁切模式：`cover`、`contain`、`fill` | 缺省 `contain` |
+
+### 内部函数
+
+**`openSource(distDir, rawURL)`**
+
+- 相对 URL → `os.Open(filepath.Join(distDir, rawURL))`
+- 绝对 URL → 复用 `fetchClient`（30s 超时 HTTP 客户端，定义于 runtime.go）
+
+**`decodeImage(r, ext)`**
+
+| 格式 | 实现 | 备注 |
+|------|------|------|
+| `jpg`/`jpeg` | `image/jpeg`（stdlib） | |
+| `png` | `image/png`（stdlib） | |
+| `gif` | `image/gif`（stdlib） | |
+| `webp` | `golang.org/x/image/webp` | 仅解码，无编码器 |
+| `avif` | — | 返回 `errUnsupportedFormat`，触发 fallback |
+
+**`resizeImage(src, w, h, fit)`**
+
+使用 `golang.org/x/image/draw.BiLinear.Scale` 进行双线性插值缩放：
+
+```
+cover:   等比放大至填满 w×h → 裁中心区域
+contain: 等比缩放至 w×h 内（不裁切）
+fill:    直接拉伸至 w×h
+```
+
+**`encodeResponse(w, img, format, quality)`**
+
+```
+fm=png          → image/png（stdlib）
+fm=jpg/jpeg     → image/jpeg（stdlib，quality 参数生效）
+fm=webp/avif    → 降级为 image/jpeg（纯 Go 无 WebP/AVIF 编码器，开发环境可接受）
+```
+
+### AVIF 降级策略
+
+Go 无纯 Go AVIF 解码器（需 CGO + libavif），AVIF 源文件走 fallback 路径：
+直接 `http.ServeFile` 原始 `.avif` 文件，忽略 `w`/`h`/`fm` 等变换参数。
+现代浏览器（Chrome 85+、Firefox 93+、Safari 16+）原生支持 AVIF，页面图片可正常显示，
+仅失去尺寸裁剪能力，不影响本地开发。
+
+---
+
 ## server.go — HTTP 路由
 
 ### 路由优先级
@@ -290,10 +359,14 @@ Netlify `preferStatic: true` 的本地模拟：
 ```
 GET /path
     │
+    ├─ /.netlify/images?...  → HandleImageCDN（图像 CDN，优先于 catch-all）
     ├─ distDir/path 是文件？ → http.ServeFile
     ├─ distDir/path/index.html 存在？ → http.ServeFile
     └─ 否 → HandleSSR
 ```
+
+`/.netlify/images` 必须在 catch-all `/` 之前注册，否则 Go 的 `ServeMux` 会将其
+匹配到 `/` 路由而进入 SSR 处理器。
 
 ### 静态缓存策略
 
