@@ -19,10 +19,10 @@ integration/
 ├── integration_test.go       # 集成测试（34 个测试）
 └── testdata/
     └── testapp-ssr/
-        └── bundle.cjs        # 预打包 CJS（1063 KB），从 examples/testapp-ssr 生成
+        └── bundle.mjs        # 预打包 ESM，从 examples/testapp-ssr 生成
 ```
 
-`bundle.cjs` 已提交到 git，测试无需 `pnpm build` 或 `node_modules`，
+`bundle.mjs` 已提交到 git，测试无需 `pnpm build` 或 `node_modules`，
 直接 `go test ./integration/` 即可运行。
 
 ## 示例应用
@@ -79,7 +79,7 @@ go test ./integration/ -v -timeout 120s
 
 ## 测试用例
 
-### SSR 端到端测试（基于 testdata/testapp-ssr/bundle.cjs）
+### SSR 端到端测试（基于 testdata/testapp-ssr/bundle.mjs）
 
 #### TC-01：商品列表页
 
