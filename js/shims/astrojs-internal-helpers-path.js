@@ -1,0 +1,14 @@
+export const joinPaths = (...ps) => ps.filter(Boolean).join('/').replace(/\/+/g, '/');
+export const removeTrailingForwardSlash = (p) => p !== '/' ? p.replace(/\/$/, '') : p;
+export const appendForwardSlash = (p) => p.endsWith('/') ? p : p + '/';
+export const prependForwardSlash = (p) => p.startsWith('/') ? p : '/' + p;
+export const removeLeadingForwardSlash = (p) => p.startsWith('/') ? p.slice(1) : p;
+export const isRemotePath = (p) => /^https?:\/\//.test(p) || p.startsWith('//');
+export const slash = (p) => p.replace(/\\/g, '/');
+export const trimSlashes = (p) => p.replace(/^\/|\/$/g, '');
+export const collapseDuplicateTrailingSlashes = (p) => p.replace(/\/{2,}$/, '/');
+export const hasFileExtension = (p) => /\.[^./]+$/.test(p.split('?')[0].split('#')[0]);
+export const isInternalPath = (p) => p.startsWith('/_') || p === '/_astro' || p.startsWith('/_astro/');
+export const removeQueryString = (p) => p.split('?')[0];
+export const fileExtension = (p) => { const b = p.split('/').pop() || ''; const i = b.lastIndexOf('.'); return i > 0 ? b.slice(i) : ''; };
+export default { joinPaths, removeTrailingForwardSlash, appendForwardSlash, prependForwardSlash, removeLeadingForwardSlash, isRemotePath, slash, trimSlashes, collapseDuplicateTrailingSlashes, hasFileExtension, isInternalPath, removeQueryString, fileExtension };

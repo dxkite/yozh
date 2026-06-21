@@ -1,4 +1,4 @@
-package astroruntime
+﻿package astroruntime
 
 import (
 	"context"
@@ -59,20 +59,22 @@ func makeHasher(hashName string) (func() hash.Hash, error) {
 	}
 }
 
-func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
-	errVal := func(msg string) (any, error) {
-		return "ERROR:" + msg, nil
-	}
+// cryptoErr formats a crypto error as an "ERROR:..." string returned to JS.
+// JS callers check for this prefix to distinguish crypto failures from normal returns.
+func cryptoErr(msg string) (any, error) {
+	return "ERROR:" + msg, nil
+}
 
-	// __go_cryptoSubtleDigest(algo, dataB64) → resultB64
+func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
+	// __go_cryptoSubtleDigest(algo, dataB64) 鈫?resultB64
 	ctx.SetGoFunc("__go_cryptoSubtleDigest", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 2 {
-			return errVal("missing arguments")
+			return cryptoErr("missing arguments")
 		}
 		algo := strings.ToUpper(args[0].(string))
 		data, err := base64.StdEncoding.DecodeString(args[1].(string))
 		if err != nil {
-			return errVal("invalid base64: " + err.Error())
+			return cryptoErr("invalid base64: " + err.Error())
 		}
 		var h []byte
 		switch algo {
@@ -89,26 +91,26 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			s := sha512.Sum512(data)
 			h = s[:]
 		default:
-			return errVal("unsupported digest algorithm: " + algo)
+			return cryptoErr("unsupported digest algorithm: " + algo)
 		}
 		return base64.StdEncoding.EncodeToString(h), nil
 	})
 
-	// __go_cryptoSubtleImportKey(format, dataB64orJWK, algoJSON, extractable, usagesJSON) → keyId
+	// __go_cryptoSubtleImportKey(format, dataB64orJWK, algoJSON, extractable, usagesJSON) 鈫?keyId
 	ctx.SetGoFunc("__go_cryptoSubtleImportKey", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 5 {
-			return errVal("missing arguments")
+			return cryptoErr("missing arguments")
 		}
 		format, _ := args[0].(string)
 		rawData, _ := args[1].(string)
 		var algo algoSpec
 		if err := json.Unmarshal([]byte(args[2].(string)), &algo); err != nil {
-			return errVal("invalid algorithm JSON: " + err.Error())
+			return cryptoErr("invalid algorithm JSON: " + err.Error())
 		}
 		extractable := args[3].(string) == "true"
 		var usages []string
 		if err := json.Unmarshal([]byte(args[4].(string)), &usages); err != nil {
-			return errVal("invalid usages JSON: " + err.Error())
+			return cryptoErr("invalid usages JSON: " + err.Error())
 		}
 
 		var keyBytes []byte
@@ -116,30 +118,30 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		case "raw":
 			b, err := base64.StdEncoding.DecodeString(rawData)
 			if err != nil {
-				return errVal("invalid base64 key data: " + err.Error())
+				return cryptoErr("invalid base64 key data: " + err.Error())
 			}
 			keyBytes = b
 		case "jwk":
 			var jwk map[string]interface{}
 			if err := json.Unmarshal([]byte(rawData), &jwk); err != nil {
-				return errVal("invalid JWK: " + err.Error())
+				return cryptoErr("invalid JWK: " + err.Error())
 			}
 			kStr, _ := jwk["k"].(string)
 			if kStr == "" {
-				return errVal("JWK missing k field")
+				return cryptoErr("JWK missing k field")
 			}
 			b, err := base64.RawURLEncoding.DecodeString(kStr)
 			if err != nil {
-				return errVal("invalid JWK k field: " + err.Error())
+				return cryptoErr("invalid JWK k field: " + err.Error())
 			}
 			keyBytes = b
 		default:
-			return errVal("unsupported key format: " + format)
+			return cryptoErr("unsupported key format: " + format)
 		}
 
 		id, err := newKeyID()
 		if err != nil {
-			return errVal(err.Error())
+			return cryptoErr(err.Error())
 		}
 		keyReg[id] = &cryptoKey{
 			ID:          id,
@@ -152,19 +154,19 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		return id, nil
 	})
 
-	// __go_cryptoSubtleGenerateKey(algoJSON, extractable, usagesJSON) → keyId
+	// __go_cryptoSubtleGenerateKey(algoJSON, extractable, usagesJSON) 鈫?keyId
 	ctx.SetGoFunc("__go_cryptoSubtleGenerateKey", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 3 {
-			return errVal("missing arguments")
+			return cryptoErr("missing arguments")
 		}
 		var algo algoSpec
 		if err := json.Unmarshal([]byte(args[0].(string)), &algo); err != nil {
-			return errVal("invalid algorithm JSON: " + err.Error())
+			return cryptoErr("invalid algorithm JSON: " + err.Error())
 		}
 		extractable := args[1].(string) == "true"
 		var usages []string
 		if err := json.Unmarshal([]byte(args[2].(string)), &usages); err != nil {
-			return errVal("invalid usages JSON: " + err.Error())
+			return cryptoErr("invalid usages JSON: " + err.Error())
 		}
 
 		name := strings.ToUpper(algo.Name)
@@ -192,16 +194,16 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 				keyLen = 32
 			}
 		default:
-			return errVal("unsupported generateKey algorithm: " + algo.Name)
+			return cryptoErr("unsupported generateKey algorithm: " + algo.Name)
 		}
 
 		keyBytes := make([]byte, keyLen)
 		if _, err := rand.Read(keyBytes); err != nil {
-			return errVal("rand: " + err.Error())
+			return cryptoErr("rand: " + err.Error())
 		}
 		id, err := newKeyID()
 		if err != nil {
-			return errVal(err.Error())
+			return cryptoErr(err.Error())
 		}
 		keyReg[id] = &cryptoKey{
 			ID:          id,
@@ -214,19 +216,19 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		return id, nil
 	})
 
-	// __go_cryptoSubtleExportKey(format, keyId) → base64 or JWK JSON string
+	// __go_cryptoSubtleExportKey(format, keyId) 鈫?base64 or JWK JSON string
 	ctx.SetGoFunc("__go_cryptoSubtleExportKey", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 2 {
-			return errVal("missing arguments")
+			return cryptoErr("missing arguments")
 		}
 		format, _ := args[0].(string)
 		keyID, _ := args[1].(string)
 		ck, ok := keyReg[keyID]
 		if !ok {
-			return errVal("key not found: " + keyID)
+			return cryptoErr("key not found: " + keyID)
 		}
 		if !ck.Extractable {
-			return errVal("key is not extractable")
+			return cryptoErr("key is not extractable")
 		}
 
 		switch format {
@@ -267,24 +269,24 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			j, _ := json.Marshal(jwk)
 			return string(j), nil
 		default:
-			return errVal("unsupported export format: " + format)
+			return cryptoErr("unsupported export format: " + format)
 		}
 	})
 
-	// __go_cryptoSubtleSign(algoJSON, keyId, dataB64) → sigB64
+	// __go_cryptoSubtleSign(algoJSON, keyId, dataB64) 鈫?sigB64
 	ctx.SetGoFunc("__go_cryptoSubtleSign", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 3 {
-			return errVal("missing arguments")
+			return cryptoErr("missing arguments")
 		}
 		keyID, _ := args[1].(string)
 		data, err := base64.StdEncoding.DecodeString(args[2].(string))
 		if err != nil {
-			return errVal("invalid data base64: " + err.Error())
+			return cryptoErr("invalid data base64: " + err.Error())
 		}
 
 		ck, ok := keyReg[keyID]
 		if !ok {
-			return errVal("key not found: " + keyID)
+			return cryptoErr("key not found: " + keyID)
 		}
 
 		switch strings.ToUpper(ck.Algo.Name) {
@@ -295,17 +297,17 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			}
 			newH, err := makeHasher(hashName)
 			if err != nil {
-				return errVal(err.Error())
+				return cryptoErr(err.Error())
 			}
 			mac := hmac.New(newH, ck.Raw)
 			mac.Write(data)
 			return base64.StdEncoding.EncodeToString(mac.Sum(nil)), nil
 		default:
-			return errVal("unsupported sign algorithm: " + ck.Algo.Name)
+			return cryptoErr("unsupported sign algorithm: " + ck.Algo.Name)
 		}
 	})
 
-	// __go_cryptoSubtleVerify(algoJSON, keyId, sigB64, dataB64) → "true"/"false"
+	// __go_cryptoSubtleVerify(algoJSON, keyId, sigB64, dataB64) 鈫?"true"/"false"
 	ctx.SetGoFunc("__go_cryptoSubtleVerify", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 4 {
 			return "false", nil
@@ -343,57 +345,57 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		}
 	})
 
-	// __go_cryptoSubtleEncrypt(algoJSON, keyId, plaintextB64) → ciphertextB64
+	// __go_cryptoSubtleEncrypt(algoJSON, keyId, plaintextB64) 鈫?ciphertextB64
 	// algoJSON.iv is base64-encoded (converted by _algoToJSON in JS)
 	ctx.SetGoFunc("__go_cryptoSubtleEncrypt", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 3 {
-			return errVal("missing arguments")
+			return cryptoErr("missing arguments")
 		}
 		var algo algoSpec
 		if err := json.Unmarshal([]byte(args[0].(string)), &algo); err != nil {
-			return errVal("invalid algorithm JSON: " + err.Error())
+			return cryptoErr("invalid algorithm JSON: " + err.Error())
 		}
 		keyID, _ := args[1].(string)
 		plaintext, err := base64.StdEncoding.DecodeString(args[2].(string))
 		if err != nil {
-			return errVal("invalid data base64: " + err.Error())
+			return cryptoErr("invalid data base64: " + err.Error())
 		}
 
 		ck, ok := keyReg[keyID]
 		if !ok {
-			return errVal("key not found: " + keyID)
+			return cryptoErr("key not found: " + keyID)
 		}
 
 		switch strings.ToUpper(ck.Algo.Name) {
 		case "AES-GCM":
 			iv, err := base64.StdEncoding.DecodeString(algo.IV)
 			if err != nil {
-				return errVal("invalid IV base64: " + err.Error())
+				return cryptoErr("invalid IV base64: " + err.Error())
 			}
 			block, err := aes.NewCipher(ck.Raw)
 			if err != nil {
-				return errVal("AES cipher: " + err.Error())
+				return cryptoErr("AES cipher: " + err.Error())
 			}
 			gcm, err := cipher.NewGCM(block)
 			if err != nil {
-				return errVal("GCM init: " + err.Error())
+				return cryptoErr("GCM init: " + err.Error())
 			}
 			if len(iv) != gcm.NonceSize() {
-				return errVal(fmt.Sprintf("AES-GCM: IV must be %d bytes, got %d", gcm.NonceSize(), len(iv)))
+				return cryptoErr(fmt.Sprintf("AES-GCM: IV must be %d bytes, got %d", gcm.NonceSize(), len(iv)))
 			}
 			ciphertext := gcm.Seal(nil, iv, plaintext, nil)
 			return base64.StdEncoding.EncodeToString(ciphertext), nil
 		case "AES-CBC":
 			iv, err := base64.StdEncoding.DecodeString(algo.IV)
 			if err != nil {
-				return errVal("invalid IV base64: " + err.Error())
+				return cryptoErr("invalid IV base64: " + err.Error())
 			}
 			if len(iv) != aes.BlockSize {
-				return errVal(fmt.Sprintf("AES-CBC: IV must be %d bytes, got %d", aes.BlockSize, len(iv)))
+				return cryptoErr(fmt.Sprintf("AES-CBC: IV must be %d bytes, got %d", aes.BlockSize, len(iv)))
 			}
 			block, err := aes.NewCipher(ck.Raw)
 			if err != nil {
-				return errVal("AES cipher: " + err.Error())
+				return cryptoErr("AES cipher: " + err.Error())
 			}
 			padded := pkcs7Pad(plaintext, aes.BlockSize)
 			mode := cipher.NewCBCEncrypter(block, iv)
@@ -401,82 +403,82 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			mode.CryptBlocks(ciphertext, padded)
 			return base64.StdEncoding.EncodeToString(ciphertext), nil
 		default:
-			return errVal("unsupported encrypt algorithm: " + ck.Algo.Name)
+			return cryptoErr("unsupported encrypt algorithm: " + ck.Algo.Name)
 		}
 	})
 
-	// __go_cryptoSubtleDecrypt(algoJSON, keyId, ciphertextB64) → plaintextB64
+	// __go_cryptoSubtleDecrypt(algoJSON, keyId, ciphertextB64) 鈫?plaintextB64
 	ctx.SetGoFunc("__go_cryptoSubtleDecrypt", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 3 {
-			return errVal("missing arguments")
+			return cryptoErr("missing arguments")
 		}
 		var algo algoSpec
 		if err := json.Unmarshal([]byte(args[0].(string)), &algo); err != nil {
-			return errVal("invalid algorithm JSON: " + err.Error())
+			return cryptoErr("invalid algorithm JSON: " + err.Error())
 		}
 		keyID, _ := args[1].(string)
 		ciphertext, err := base64.StdEncoding.DecodeString(args[2].(string))
 		if err != nil {
-			return errVal("invalid data base64: " + err.Error())
+			return cryptoErr("invalid data base64: " + err.Error())
 		}
 
 		ck, ok := keyReg[keyID]
 		if !ok {
-			return errVal("key not found: " + keyID)
+			return cryptoErr("key not found: " + keyID)
 		}
 
 		switch strings.ToUpper(ck.Algo.Name) {
 		case "AES-GCM":
 			iv, err := base64.StdEncoding.DecodeString(algo.IV)
 			if err != nil {
-				return errVal("invalid IV base64: " + err.Error())
+				return cryptoErr("invalid IV base64: " + err.Error())
 			}
 			block, err := aes.NewCipher(ck.Raw)
 			if err != nil {
-				return errVal("AES cipher: " + err.Error())
+				return cryptoErr("AES cipher: " + err.Error())
 			}
 			gcm, err := cipher.NewGCM(block)
 			if err != nil {
-				return errVal("GCM init: " + err.Error())
+				return cryptoErr("GCM init: " + err.Error())
 			}
 			if len(iv) != gcm.NonceSize() {
-				return errVal(fmt.Sprintf("AES-GCM: IV must be %d bytes, got %d", gcm.NonceSize(), len(iv)))
+				return cryptoErr(fmt.Sprintf("AES-GCM: IV must be %d bytes, got %d", gcm.NonceSize(), len(iv)))
 			}
 			plaintext, err := gcm.Open(nil, iv, ciphertext, nil)
 			if err != nil {
-				return errVal("AES-GCM decrypt failed: " + err.Error())
+				return cryptoErr("AES-GCM decrypt failed: " + err.Error())
 			}
 			return base64.StdEncoding.EncodeToString(plaintext), nil
 		case "AES-CBC":
 			iv, err := base64.StdEncoding.DecodeString(algo.IV)
 			if err != nil {
-				return errVal("invalid IV base64: " + err.Error())
+				return cryptoErr("invalid IV base64: " + err.Error())
 			}
 			if len(iv) != aes.BlockSize {
-				return errVal(fmt.Sprintf("AES-CBC: IV must be %d bytes, got %d", aes.BlockSize, len(iv)))
+				return cryptoErr(fmt.Sprintf("AES-CBC: IV must be %d bytes, got %d", aes.BlockSize, len(iv)))
 			}
 			block, err := aes.NewCipher(ck.Raw)
 			if err != nil {
-				return errVal("AES cipher: " + err.Error())
+				return cryptoErr("AES cipher: " + err.Error())
 			}
 			if len(ciphertext)%aes.BlockSize != 0 {
-				return errVal("AES-CBC: ciphertext length not multiple of block size")
+				return cryptoErr("AES-CBC: ciphertext length not multiple of block size")
 			}
 			plaintext := make([]byte, len(ciphertext))
 			cipher.NewCBCDecrypter(block, iv).CryptBlocks(plaintext, ciphertext)
 			unpadded, err := pkcs7Unpad(plaintext, aes.BlockSize)
 			if err != nil {
-				return errVal("AES-CBC unpad: " + err.Error())
+				return cryptoErr("AES-CBC unpad: " + err.Error())
 			}
 			return base64.StdEncoding.EncodeToString(unpadded), nil
 		default:
-			return errVal("unsupported decrypt algorithm: " + ck.Algo.Name)
+			return cryptoErr("unsupported decrypt algorithm: " + ck.Algo.Name)
 		}
 	})
 
-	// __go_cryptoSubtleDeriveBits — P1, not yet implemented
+	// __go_cryptoSubtleDeriveBits 鈥?P1, not yet implemented
 	ctx.SetGoFunc("__go_cryptoSubtleDeriveBits", func(_ context.Context, args ...any) (any, error) {
-		return errVal("deriveBits not yet implemented (P1 feature)")
+		return cryptoErr("deriveBits not yet implemented (P1 feature)")
 	})
 }
 
@@ -510,3 +512,4 @@ func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 	}
 	return data[:len(data)-pad], nil
 }
+
