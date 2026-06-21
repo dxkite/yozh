@@ -81,7 +81,7 @@ func injectHostFunctions(ctx *qjs.Context, env map[string]string, keyReg map[str
 	envJSON, _ := json.Marshal(env)
 	setupEnv := fmt.Sprintf(`
 globalThis.__processEnv = %s;
-globalThis.process = { env: __processEnv, version: 'v20.0.0', versions: {}, platform: 'linux' };
+globalThis.process = { env: __processEnv, version: 'v20.0.0', versions: {}, platform: 'linux', stdout: { fd: 1, write: function(){} }, stderr: { fd: 2, write: function(){} } };
 // Make Object.prototype.toString.call(process) === '[object process]'
 // so that Astro's isNode check returns true and it uses renderToAsyncIterable
 // (async generator) instead of renderToReadableStream (ReadableStream-based).
