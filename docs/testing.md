@@ -5,7 +5,7 @@
 | 项目 | 值 |
 |---|---|
 | 操作系统 | Windows 11 Pro 10.0.22635 |
-| Go 版本 | 1.22+ |
+| Go 版本 | 1.25.0+ |
 | Node.js | v20+（用于 `astro build`） |
 | pnpm | v10.26.0 |
 | Astro | 5.18.2 |
@@ -16,7 +16,7 @@
 
 ```
 integration/
-├── integration_test.go       # 集成测试（28 个测试）
+├── integration_test.go       # 集成测试（34 个测试）
 └── testdata/
     └── testapp-ssr/
         └── bundle.cjs        # 预打包 CJS（1063 KB），从 examples/testapp-ssr 生成
@@ -345,32 +345,92 @@ TestTextEncoderInto
 
 ---
 
-#### TC-28：BFF 并发 fetch（集成测试）
+#### TC-28：BFF 单次上游 fetch
+
+```go
+TestBFFUpstreamFetch
+```
+**验证**：`fetch(upstreamURL)` → `res.json()` 返回正确数据，基础 fetch 路径可用。
+
+---
+
+#### TC-29：BFF 多服务聚合（Promise.allSettled）
+
+```go
+TestBFFAggregation
+```
+**验证**：`Promise.allSettled([fetch(catalog), fetch(inventory)])` 并发调用两个服务，
+合并结果返回正确的 `{ name, stock }`。
+
+---
+
+#### TC-30：BFF 优雅降级（上游 503）
+
+```go
+TestBFFGracefulDegradation
+```
+**验证**：一个服务正常、一个返回 503；`Promise.allSettled` 不崩溃，
+成功服务返回数据，失败服务返回 null，整体请求正常完成。
+
+---
+
+#### TC-31：BFF 并发 fetch 耗时验证
 
 ```go
 TestBFFConcurrentFetch
 ```
 **验证**：`Promise.allSettled([fetch(a), fetch(b), fetch(c)])` 真正并发执行；
-3 个各 80ms 的请求总耗时 ≤ 120ms（实测 ≈ 83ms），而非顺序执行的 240ms。
-测试在 `integration/integration_test.go`，使用内置 HTTP mock server 模拟上游服务延迟。
+3 个各 80ms 的请求总耗时 ≤ 240ms（远小于顺序执行的 3×80ms）。
+测试使用内置 HTTP mock server 模拟上游服务延迟。
+
+---
+
+#### TC-32：BFF 会话中间件（HMAC 签名 token）
+
+```go
+TestBFFSessionMiddleware
+```
+**验证**：`crypto.subtle` sign + verify 全流程：`btoa(userId)` → HMAC-SHA256 签名 →
+token = `payload.sig`；verify 后正确解码出 userId，模拟 `src/middleware.ts` 鉴权逻辑。
+
+---
+
+#### TC-33：BFF 购物车 Cookie 加密 round-trip（AES-GCM）
+
+```go
+TestBFFCartCookieRoundTrip
+```
+**验证**：`generateKey(AES-GCM)` → `encrypt(items)` → `base64(iv).base64(ct)` → `decrypt` →
+解码出相同的商品数据，模拟 `src/pages/api/cart.ts` 的 cookie 存储策略。
+
+---
+
+#### TC-34：BFF 上游 HMAC 签名请求（端到端验证）
+
+```go
+TestBFFUpstreamHMACAuth
+```
+**验证**：JS 用 `crypto.subtle.sign` 计算 HMAC-SHA256 签名后附加到请求头；
+Go HTTP mock server 用 `crypto/hmac` 验证同一签名，通过则返回 200。
+模拟 `src/lib/upstream.ts` 的 `upstreamGet` 签名认证流程。
 
 ---
 
 ### 并发异步函数测试（asyncfunc_test.go）
 
-以下三个测试位于根模块（非 `integration/`），直接测试 `SetAsyncFunc` 机制。
+以下三个测试位于根模块（非 `integration/`），直接测试 `SetGoAsyncFunc` 机制。
 
-#### TC-29：单次 async 调用
+#### TC-35：单次 async 调用
 
 ```go
 TestSetAsyncFuncSingle
 ```
-**验证**：`SetAsyncFunc` 注册的函数被 JS `await` 调用后，goroutine 正确 resolve Promise，
+**验证**：`SetGoAsyncFunc` 注册的函数被 JS `await` 调用后，goroutine 正确 resolve Promise，
 JS 得到预期返回值。
 
 ---
 
-#### TC-30：多次并发 async 调用
+#### TC-36：多次并发 async 调用
 
 ```go
 TestSetAsyncFuncConcurrent
@@ -380,7 +440,7 @@ TestSetAsyncFuncConcurrent
 
 ---
 
-#### TC-31：并发耗时验证
+#### TC-37：并发耗时验证
 
 ```go
 TestSetAsyncFuncTiming
@@ -397,8 +457,9 @@ TestSetAsyncFuncTiming
 | SSR 端到端（商品列表、动态路由、购物车会话） | 8 | ✅ |
 | Polyfill 单元（TextEncoder、Headers、URL、crypto） | 11 | ✅ |
 | 回归/安全（Pool 校验、空 body、搜索参数、AES IV、padding） | 8 | ✅ |
-| 并发 async（BFF 集成 + SetAsyncFunc 单元） | 4 | ✅ |
-| **合计** | **31** | **全部通过** |
+| BFF 集成（上游 fetch、聚合、降级、并发、会话、购物车、HMAC 认证） | 7 | ✅ |
+| 并发 async（SetGoAsyncFunc 单元） | 3 | ✅ |
+| **合计** | **37** | **全部通过** |
 
 ---
 

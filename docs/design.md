@@ -67,28 +67,29 @@ server.go — 路由分发
 ```
 1. injectHostFunctions()
    ├── __processEnv / process（含 Symbol.toStringTag = 'process'）
-   ├── __cryptoRandomBytes(n) → Go crypto/rand → ArrayBuffer
-   ├── __consoleWrite(level, msg) → Go stderr
-   ├── __goFetchRaw(url, method, headers, body) → Go http.Client（async）
+   ├── __go_cryptoRandomBytes(n) → Go crypto/rand → ArrayBuffer
+   ├── __go_consoleWrite(level, msg) → Go stderr
+   ├── __go_fetchRaw(url, method, headers, body) → Go http.Client（async）
    │
    ├── injectBinaryOps()
-   │   ├── __textEncodeUTF8(str) → ArrayBuffer
-   │   ├── __textDecodeUTF8(b64) → string
-   │   ├── __bufToB64(jsonNumArray) → base64 string
-   │   └── __b64ToBuf(b64) → ArrayBuffer
+   │   ├── __go_textEncodeUTF8(str) → ArrayBuffer
+   │   ├── __go_textDecodeUTF8(b64) → string
+   │   ├── __go_bufToB64(jsonNumArray) → base64 string
+   │   └── __go_b64ToBuf(b64) → ArrayBuffer
    │
    ├── injectURLParser()
-   │   └── __urlParse(input, base) → JSON（Go net/url 实现）
+   │   └── __go_urlParse(input, base) → JSON（Go net/url 实现）
    │
    └── injectCryptoSubtle()
-       ├── __cryptoSubtleDigest(algo, dataB64) → resultB64
-       ├── __cryptoSubtleImportKey(format, data, algoJSON, extractable, usagesJSON) → keyId
-       ├── __cryptoSubtleGenerateKey(algoJSON, extractable, usagesJSON) → keyId
-       ├── __cryptoSubtleExportKey(format, keyId) → b64 或 JWK JSON
-       ├── __cryptoSubtleSign(algoJSON, keyId, dataB64) → sigB64
-       ├── __cryptoSubtleVerify(algoJSON, keyId, sigB64, dataB64) → "true"/"false"
-       ├── __cryptoSubtleEncrypt(algoJSON, keyId, plainB64) → cipherB64
-       └── __cryptoSubtleDecrypt(algoJSON, keyId, cipherB64) → plainB64
+       ├── __go_cryptoSubtleDigest(algo, dataB64) → resultB64
+       ├── __go_cryptoSubtleImportKey(format, data, algoJSON, extractable, usagesJSON) → keyId
+       ├── __go_cryptoSubtleGenerateKey(algoJSON, extractable, usagesJSON) → keyId
+       ├── __go_cryptoSubtleExportKey(format, keyId) → b64 或 JWK JSON
+       ├── __go_cryptoSubtleSign(algoJSON, keyId, dataB64) → sigB64
+       ├── __go_cryptoSubtleVerify(algoJSON, keyId, sigB64, dataB64) → "true"/"false"
+       ├── __go_cryptoSubtleEncrypt(algoJSON, keyId, plainB64) → cipherB64
+       ├── __go_cryptoSubtleDecrypt(algoJSON, keyId, cipherB64) → plainB64
+       └── __go_cryptoSubtleDeriveBits(algoJSON, keyId, length) → ERROR（P1 stub）
 
 2. webAPIPolyfill（js/web-api.js）
    └── TextEncoder, TextDecoder, Headers, Request, Response
@@ -110,10 +111,10 @@ server.go — 路由分发
    └── structuredClone（fallback）
 
 8. consoleDef（js/console.js）
-   └── console.log/info/warn/error/debug → __consoleWrite
+   └── console.log/info/warn/error/debug → __go_consoleWrite
 
 9. fetchDef（js/fetch.js）
-   └── globalThis.fetch → __goFetchRaw
+   └── globalThis.fetch → __go_fetchRaw
 
 10. CJS bundle（esbuild 打包的 Astro SSR）
     └── 包装在 (function(module, exports){ ... }) 中，结尾提取 __ssrHandler
@@ -184,18 +185,18 @@ for await (var chunk of b) {
   var u8 = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk.buffer, ...);
   for (var j = 0; j < u8.length; j++) allBytes.push(u8[j]);
 }
-return __textDecodeUTF8(__bufToB64(JSON.stringify(allBytes)));
+return __go_textDecodeUTF8(__go_bufToB64(JSON.stringify(allBytes)));
 ```
 
 ### 6. 二进制数据跨边界传输（base64 + JSON）
 
 Go 与 QJS 之间传递二进制数据（密钥、密文、摘要）通过两种路径：
 
-- **ArrayBuffer 直传**（`ctx.NewArrayBuffer`）：用于 `__cryptoRandomBytes`、`__textEncodeUTF8`、`__b64ToBuf`
-- **base64 字符串**（JSON 编码）：用于 `__cryptoSubtle*` 系列函数（加密 API 的参数和返回值）
+- **ArrayBuffer 直传**（`ctx.NewArrayBuffer`）：用于 `__go_cryptoRandomBytes`、`__go_textEncodeUTF8`、`__go_b64ToBuf`
+- **base64 字符串**（JSON 编码）：用于 `__go_cryptoSubtle*` 系列函数（加密 API 的参数和返回值）
 
 JS 侧调用前用 `_toB64(typedArray)` 把 ArrayBuffer/TypedArray 序列化为 JSON 字节数组再转 base64，
-返回值用 `__b64ToBuf(b64)` 还原为 ArrayBuffer。
+返回值用 `__go_b64ToBuf(b64)` 还原为 ArrayBuffer。
 
 ### 7. 常量时间 PKCS7 填充验证（防 padding oracle）
 
@@ -225,11 +226,11 @@ var fetchClient = &http.Client{Timeout: 30 * time.Second}
 ### 9. 并发 fetch via `pendingCallbacks` channel
 
 wazero 的 WASM 实例非线程安全，所有 WASM 调用必须来自同一 goroutine。
-为让 `Promise.allSettled([fetch(a), fetch(b)])` 真正并发，`__goFetchRaw` 使用 `SetAsyncFunc`：
+为让 `Promise.allSettled([fetch(a), fetch(b)])` 真正并发，`__go_fetchRaw` 使用 `SetGoAsyncFunc`：
 
 ```
 JS: fetch(url)
-  → SetAsyncFunc goroutine 启动，执行 HTTP 请求（不接触 WASM）
+  → SetGoAsyncFunc goroutine 启动，执行 HTTP 请求（不接触 WASM）
   → 完成后写入 Context.pendingCallbacks chan func()
 
 JS: Await() 轮询循环（在 QJS goroutine 上）：
@@ -240,7 +241,7 @@ JS: Await() 轮询循环（在 QJS goroutine 上）：
 
 `dxkite/qjs` 在上游基础上增加了：
 - `Context.pendingCallbacks chan func()`（容量 64）
-- `SetAsyncFunc(name string, fn func(*This))` / `RunAsync(promise *Value, fn func() (*Value, error))`
+- `SetGoAsyncFunc(name string, fn func(*This))` / `RunAsync(promise *Value, fn func() (*Value, error))`
 - C 导出 `QJS_ExecutePendingJob` / `QJS_IsPromisePending`（`qjswasm/helpers.c`）
 - `eval.c` 中移除 `js_std_await`，由 Go 端 `Await()` 统一驱动 Promise 解析
 
@@ -262,7 +263,7 @@ QJS: __ssrHandler(request, context)
     │ renderToAsyncIterable → AsyncGenerator<Uint8Array>
     │ new Response(asyncIterable, {status, headers})
     ▼
-QJS: response.text() → 收集全部字节 → __textDecodeUTF8 → string
+QJS: response.text() → 收集全部字节 → __go_textDecodeUTF8 → string
     │ JSON.stringify({status, headers, body})
     ▼
 Go: json.Unmarshal → responsePayload
@@ -304,7 +305,7 @@ Go HTTP Response
 
 | 依赖 | 版本 | 用途 |
 |---|---|---|
-| `github.com/dxkite/qjs` | v0.0.0-20260621001741-4363bef2dab5 | QuickJS-NG via wazero（纯 Go，无 CGO）；增加 `pendingCallbacks` channel、`SetAsyncFunc`、`RunAsync`、`QJS_ExecutePendingJob` / `QJS_IsPromisePending` WASM 导出 |
+| `github.com/dxkite/qjs` | v0.0.0-20260621013206-c1dcd337bac8 | QuickJS-NG via wazero（纯 Go，无 CGO）；增加 `pendingCallbacks` channel、`SetGoAsyncFunc`、`RunAsync`、`QJS_ExecutePendingJob` / `QJS_IsPromisePending` WASM 导出；注册函数 API 改为 `SetGoFunc` / `SetGoAsyncFunc` |
 | `github.com/tetratelabs/wazero` | v1.9.0 | WebAssembly 运行时（qjs 间接依赖） |
 | `github.com/evanw/esbuild` | v0.25.0 | in-process JS 打包 |
 | `golang.org/x/image` | v0.43.0 | WebP 图像解码（`webp` 子包）；`draw.BiLinear` 双线性缩放（`draw` 子包） |

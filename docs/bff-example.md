@@ -82,7 +82,7 @@ export async function upstreamGet<T>(url: string): Promise<T> {
 ```
 
 > **astro-runtime 说明**：`crypto.subtle` 由 Go 实现（`crypto_subtle.go`），`fetch()` 通过
-> `__goFetchRaw` 调用 Go 的 `http.Client`（30 秒超时）。两者均对 TypeScript 透明。
+> `__go_fetchRaw` 调用 Go 的 `http.Client`（30 秒超时）。两者均对 TypeScript 透明。
 
 ---
 
@@ -358,7 +358,7 @@ Go HTTP Response → 浏览器
 
 astro-runtime 使用 [wazero](https://wazero.io/) 将 QuickJS 编译为 WASM 运行。wazero 的 WASM 实例**不是线程安全的** — 所有对 WASM 实例的调用必须来自同一 goroutine。
 
-`fetch()` 通过 `SetAsyncFunc` 实现并发，核心机制为 `pendingCallbacks chan func()`：
+`fetch()` 通过 `SetGoAsyncFunc` 实现并发，核心机制为 `pendingCallbacks chan func()`：
 
 ```
 QJS goroutine（持有 WASM 实例）            Go 工作 goroutine（不接触 WASM）

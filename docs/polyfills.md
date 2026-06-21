@@ -24,7 +24,7 @@ webAPIPolyfill → cryptoPolyfill → filePolyfill → envAPIStub
 - BMP（< 0x10000）：3 字节
 - 补充字符（Emoji 等）：4 字节，正确处理 `codePointAt` / `i += 2`
 
-`encode(str)` 调用 `__textEncodeUTF8` host function，Go 直接将字符串转为 `[]byte`（原生 UTF-8），
+`encode(str)` 调用 `__go_textEncodeUTF8` host function，Go 直接将字符串转为 `[]byte`（原生 UTF-8），
 返回真实 ArrayBuffer，而非 JS 位运算手工构建。
 
 `encodeInto(str, dest)` 写入到已有 TypedArray（Astro 渲染输出用到）。
@@ -34,7 +34,7 @@ webAPIPolyfill → cryptoPolyfill → filePolyfill → envAPIStub
 ### TextDecoder
 
 仅支持 UTF-8（`encoding` 参数接受但忽略非 UTF-8）。
-`decode(buf)` 先将字节数组序列化为 base64，再调用 `__textDecodeUTF8` host function。
+`decode(buf)` 先将字节数组序列化为 base64，再调用 `__go_textDecodeUTF8` host function。
 
 ### Headers
 
@@ -53,7 +53,7 @@ webAPIPolyfill → cryptoPolyfill → filePolyfill → envAPIStub
 
 - `body` 支持：`null`、`string`、`Uint8Array`、`ReadableStream`（含 `getReader`）、`AsyncIterable`（含 `Symbol.asyncIterator`）
 - 所有 body 类型均采用**全量字节收集 + 一次解码**策略：先将 chunk 字节追加到 `allBytes[]`，
-  再用 `__textDecodeUTF8(__bufToB64(JSON.stringify(allBytes)))` 统一解码，
+  再用 `__go_textDecodeUTF8(__go_bufToB64(JSON.stringify(allBytes)))` 统一解码，
   避免跨 chunk 边界截断多字节 UTF-8 序列
 - `Response.json(data, init)` / `Response.redirect(url, status)` / `Response.error()` 静态方法
 
@@ -71,12 +71,12 @@ bytes[8] = (bytes[8] & 0x3f) | 0x80;
 
 ### `crypto.getRandomValues(typedArray)`
 
-按 typedArray 的 byteLength 调用 `__cryptoRandomBytes`，填充每个字节。
+按 typedArray 的 byteLength 调用 `__go_cryptoRandomBytes`，填充每个字节。
 支持所有整数 TypedArray（Uint8Array、Uint32Array 等）。
 
 ### `crypto.subtle`
 
-完整 Web Crypto API，由 JS 薄封装层调用 Go host functions（`__cryptoSubtle*`）实现。
+完整 Web Crypto API，由 JS 薄封装层调用 Go host functions（`__go_cryptoSubtle*`）实现。
 参见 [components.md](./components.md) crypto_subtle.go 节。
 
 支持的操作：
@@ -84,6 +84,8 @@ bytes[8] = (bytes[8] & 0x3f) | 0x80;
 - `generateKey` / `importKey` / `exportKey`：HMAC（SHA-256/384/512）、AES-GCM、AES-CBC
 - `sign` / `verify`：HMAC
 - `encrypt` / `decrypt`：AES-GCM（12 字节 nonce）、AES-CBC（16 字节 IV + PKCS7）
+- `deriveBits` / `deriveKey`：JS 层已定义接口，调用 `__go_cryptoSubtleDeriveBits` stub（P1，Go 端尚未实现，调用时抛出错误）
+- `wrapKey` / `unwrapKey`：抛出 NotSupportedError
 
 ### 为何先于 bundle eval
 
@@ -153,12 +155,12 @@ web-streams-polyfill 内部用到此 API。
 
 ### btoa / atob
 
-通过 `__bufToB64` / `__b64ToBuf` host functions 实现，Go `encoding/base64` 处理，
+通过 `__go_bufToB64` / `__go_b64ToBuf` host functions 实现，Go `encoding/base64` 处理，
 严格校验输入，不会静默损坏非法字符。
 
 ### URL / URLSearchParams
 
-`URL` 构造时调用 `__urlParse` host function，由 Go `net/url` 解析，支持：
+`URL` 构造时调用 `__go_urlParse` host function，由 Go `net/url` 解析，支持：
 - 绝对 URL 和相对 URL（base 参数）
 - IPv6 地址、credentials（`username:password@host`）
 - `%` percent-encoding 规范化
@@ -224,7 +226,7 @@ if (a instanceof Error || (a && typeof a.message === 'string' && typeof a.stack 
 
 ```
 globalThis.fetch(input, init)
-  → __goFetchRaw(url, method, headersJSON, body)  [async host function]
+  → __go_fetchRaw(url, method, headersJSON, body)  [async host function]
   → Go: fetchClient.Do(req)（30 秒超时）
   → Go: JSON { status, headers, body }
   → new Response(body, { status, headers })
@@ -254,5 +256,5 @@ globalThis.fetch(input, init)
 | `Intl` 本地化格式 | stub 忽略 locale |
 | `Response.formData()` | 未实现 |
 | `Request.formData()` | 未实现 |
-| `crypto.subtle.deriveBits` / `deriveKey` | 未实现（PBKDF2、HKDF） |
+| `crypto.subtle.deriveBits` / `deriveKey` | JS 层接口已定义，Go 端 stub 尚未实现（P1），调用时抛出 OperationError |
 | ECDSA / RSA-OAEP | 未实现 |

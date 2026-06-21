@@ -126,27 +126,28 @@ Object.defineProperty(globalThis.process, Symbol.toStringTag, { value: 'process'
 
 | Host Function | 类型 | 参数 | 返回 | 实现 |
 |---|---|---|---|---|
-| `__cryptoRandomBytes(n)` | 同步 | 字节数 | ArrayBuffer | `crypto/rand.Read` |
-| `__consoleWrite(level, msg)` | 同步 | 日志级别、消息 | `""` | `fmt.Fprintf(os.Stderr)` |
-| `__goFetchRaw(url, method, headersJSON, body)` | 异步 | 请求参数 | JSON 响应字符串 | `fetchClient.Do`（30s 超时） |
-| `__textEncodeUTF8(str)` | 同步 | 字符串 | ArrayBuffer | Go `[]byte(str)` |
-| `__textDecodeUTF8(b64)` | 同步 | base64 字符串 | 字符串 | `base64.Decode` + `string(b)` |
-| `__bufToB64(jsonNumArray)` | 同步 | JSON 字节数组 | base64 字符串 | `base64.StdEncoding.EncodeToString` |
-| `__b64ToBuf(b64)` | 同步 | base64 字符串 | ArrayBuffer | `base64.StdEncoding.DecodeString` |
-| `__urlParse(input, base)` | 同步 | URL 字符串、base 字符串 | JSON 字符串 | `net/url.Parse` + `ResolveReference` |
-| `__cryptoSubtleDigest(algo, dataB64)` | 同步 | 算法名、数据 base64 | 摘要 base64 | `crypto/sha256`、`sha512`、`sha1` |
-| `__cryptoSubtleImportKey(...)` | 同步 | format、数据、算法 JSON | keyId 或 `ERROR:msg` | 解析并存入 keyRegistry |
-| `__cryptoSubtleGenerateKey(...)` | 同步 | 算法 JSON | keyId | `crypto/rand` 生成 |
-| `__cryptoSubtleExportKey(format, keyId)` | 同步 | - | base64 或 JWK JSON | 从 keyRegistry 取出序列化 |
-| `__cryptoSubtleSign(algoJSON, keyId, dataB64)` | 同步 | - | 签名 base64 | `crypto/hmac` |
-| `__cryptoSubtleVerify(algoJSON, keyId, sigB64, dataB64)` | 同步 | - | `"true"`/`"false"` | `hmac.Equal` |
-| `__cryptoSubtleEncrypt(algoJSON, keyId, plainB64)` | 同步 | - | 密文 base64 | AES-GCM / AES-CBC |
-| `__cryptoSubtleDecrypt(algoJSON, keyId, cipherB64)` | 同步 | - | 明文 base64 | AES-GCM / AES-CBC |
+| `__go_cryptoRandomBytes(n)` | 同步 | 字节数 | ArrayBuffer | `crypto/rand.Read` |
+| `__go_consoleWrite(level, msg)` | 同步 | 日志级别、消息 | `""` | `fmt.Fprintf(os.Stderr)` |
+| `__go_fetchRaw(url, method, headersJSON, body)` | 异步 | 请求参数 | JSON 响应字符串 | `fetchClient.Do`（30s 超时） |
+| `__go_textEncodeUTF8(str)` | 同步 | 字符串 | ArrayBuffer | Go `[]byte(str)` |
+| `__go_textDecodeUTF8(b64)` | 同步 | base64 字符串 | 字符串 | `base64.Decode` + `string(b)` |
+| `__go_bufToB64(jsonNumArray)` | 同步 | JSON 字节数组 | base64 字符串 | `base64.StdEncoding.EncodeToString` |
+| `__go_b64ToBuf(b64)` | 同步 | base64 字符串 | ArrayBuffer | `base64.StdEncoding.DecodeString` |
+| `__go_urlParse(input, base)` | 同步 | URL 字符串、base 字符串 | JSON 字符串 | `net/url.Parse` + `ResolveReference` |
+| `__go_cryptoSubtleDigest(algo, dataB64)` | 同步 | 算法名、数据 base64 | 摘要 base64 | `crypto/sha256`、`sha512`、`sha1` |
+| `__go_cryptoSubtleImportKey(...)` | 同步 | format、数据、算法 JSON | keyId 或 `ERROR:msg` | 解析并存入 keyRegistry |
+| `__go_cryptoSubtleGenerateKey(...)` | 同步 | 算法 JSON | keyId | `crypto/rand` 生成 |
+| `__go_cryptoSubtleExportKey(format, keyId)` | 同步 | - | base64 或 JWK JSON | 从 keyRegistry 取出序列化 |
+| `__go_cryptoSubtleSign(algoJSON, keyId, dataB64)` | 同步 | - | 签名 base64 | `crypto/hmac` |
+| `__go_cryptoSubtleVerify(algoJSON, keyId, sigB64, dataB64)` | 同步 | - | `"true"`/`"false"` | `hmac.Equal` |
+| `__go_cryptoSubtleEncrypt(algoJSON, keyId, plainB64)` | 同步 | - | 密文 base64 | AES-GCM / AES-CBC |
+| `__go_cryptoSubtleDecrypt(algoJSON, keyId, cipherB64)` | 同步 | - | 明文 base64 | AES-GCM / AES-CBC |
+| `__go_cryptoSubtleDeriveBits(algoJSON, keyId, length)` | 同步 | - | `ERROR:...`（P1 stub） | 未实现，返回错误 |
 
-`__goFetchRaw` 使用 `ctx.SetAsyncFunc`：goroutine 执行 HTTP 请求后将 resolve/reject 写入
+`__go_fetchRaw` 使用 `ctx.SetGoAsyncFunc`：goroutine 执行 HTTP 请求后将 resolve/reject 写入
 `Context.pendingCallbacks chan func()`，QJS goroutine 的 `Await()` 轮询循环在 WASM 安全的上下文中消费
 该 channel 并 resolve Promise，实现真正的并发 fetch（`Promise.allSettled` 3×80ms ≈ 83ms）。
-其余函数均为同步（`ctx.SetFunc`）。
+其余函数均为同步（`ctx.SetGoFunc`）。
 
 ---
 
@@ -154,7 +155,7 @@ Object.defineProperty(globalThis.process, Symbol.toStringTag, { value: 'process'
 
 ### 职责
 
-实现 `crypto.subtle.*` 所有操作的 Go 端逻辑，注册为 `__cryptoSubtle*` host functions，
+实现 `crypto.subtle.*` 所有操作的 Go 端逻辑，注册为 `__go_cryptoSubtle*` host functions，
 供 `js/crypto.js` 中的薄 JS 封装层调用。
 
 ### Key Registry
@@ -166,7 +167,7 @@ Object.defineProperty(globalThis.process, Symbol.toStringTag, { value: 'process'
 type cryptoKey struct {
     ID          string
     Type        string    // "secret" | "public" | "private"
-    Algorithm   ckAlgo
+    Algo        algoSpec
     Raw         []byte
     Extractable bool
     Usages      []string
@@ -263,18 +264,20 @@ func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request)
 ### 流程
 
 ```
-1. io.ReadAll(io.LimitReader(r.Body, 10MB)) → body string（非 GET/HEAD）
-   注：空 body POST 传递 ""，不跳过
-2. 收集 r.Header → [][2]string
-3. json.Marshal(requestPayload) → payloadBytes
-4. json.Marshal(string(payloadBytes)) → JS 字符串字面量（双重编码）
-5. pool.Get() → rt
-6. ctx.Eval("handle-request.js", "await __handleRequest("+jsLiteral+")", FlagAsync)
-7. json.Unmarshal(resultVal.String()) → responsePayload
-8. w.Header().Add 写入响应头
-9. w.WriteHeader(resp.Status)
-10. fmt.Fprint(w, resp.Body)
-11. pool.Put(rt) [defer]
+1. io.ReadAll(io.LimitReader(r.Body, 10MB)) → bodyPtr *string（非 GET/HEAD 且 r.Body != nil）
+   GET/HEAD: bodyPtr = nil（JSON 序列化为 null）
+   空 body POST: bodyPtr 指向 ""（JSON 序列化为 ""）
+2. fullURL(r) → 重建完整 URL（scheme://host+RequestURI）
+3. 收集 r.Header → [][2]string
+4. json.Marshal(requestPayload) → payloadBytes
+5. json.Marshal(string(payloadBytes)) → JS 字符串字面量（双重编码）
+6. pool.Get() → rt
+7. ctx.Eval("handle-request.js", "await __handleRequest("+jsLiteral+")", FlagAsync)
+8. json.Unmarshal(resultVal.String()) → responsePayload
+9. w.Header().Add 写入响应头
+10. w.WriteHeader(resp.Status)
+11. fmt.Fprint(w, resp.Body)
+12. pool.Put(rt) [defer]
 ```
 
 双重 JSON 编码保证 payload 中含特殊字符时 JS 代码字符串仍然合法。

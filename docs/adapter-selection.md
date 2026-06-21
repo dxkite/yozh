@@ -123,7 +123,7 @@ Netlify 适配器的产物已经是 esbuild 打包的结果，但 entry 仍是 `
 - 纯 Go，无 CGO，单二进制分发
 - 完整 ES2023 + async/await 支持（Astro bundle 大量使用）
 - Pool 模型天然支持并发（每个 runtime 独立 JS heap）
-- 增加 `pendingCallbacks` channel、`SetAsyncFunc` / `RunAsync` 实现并发 fetch，
+- 增加 `pendingCallbacks` channel、`SetGoAsyncFunc` / `RunAsync` 实现并发 fetch，
   同时保持 wazero 的单线程约束
 
 ### Pool 模型与 BFF Render
