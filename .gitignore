@@ -12,3 +12,4 @@ dist/
 
 # integration/testdata contains committed build artifacts — do not ignore
 !integration/testdata/
+*.log

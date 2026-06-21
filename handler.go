@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/dxkite/qjs"
 )
@@ -28,23 +27,6 @@ type responsePayload struct {
 
 // HandleSSR processes one HTTP request through the QJS SSR runtime.
 func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request) {
-	// Only cache safe, idempotent GET/HEAD requests with no body.
-	cacheKey := ""
-	if r.Method == http.MethodGet || r.Method == http.MethodHead {
-		cacheKey = r.URL.RequestURI()
-		if hit := cacheGet(cacheKey); hit != nil {
-			for _, kv := range hit.headers {
-				w.Header().Add(kv[0], kv[1])
-			}
-			w.Header().Set("X-Cache", "HIT")
-			w.WriteHeader(hit.status)
-			if r.Method != http.MethodHead && hit.body != "" {
-				fmt.Fprint(w, hit.body)
-			}
-			return
-		}
-	}
-
 	// Read request body (bounded to 10 MB)
 	var bodyPtr *string
 	if r.Body != nil && r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -107,16 +89,6 @@ func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal([]byte(resultVal.String()), &resp); err != nil {
 		http.Error(w, fmt.Sprintf("invalid JS response: %v", err), http.StatusInternalServerError)
 		return
-	}
-
-	// Store in cache for GET/HEAD 2xx responses
-	if cacheKey != "" && resp.Status >= 200 && resp.Status < 300 {
-		cachePut(cacheKey, &cachedResponse{
-			status:  resp.Status,
-			headers: resp.Headers,
-			body:    resp.Body,
-			at:      time.Now(),
-		})
 	}
 
 	// Write response headers

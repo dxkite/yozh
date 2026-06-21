@@ -24,10 +24,10 @@ var (
 	minPool     *astroruntime.Pool // eval-based minimal bundle, size=4, for polyfill/crypto/BFF tests
 )
 
-// minBundle is a minimal CJS bundle that evals arbitrary JS expressions via query param,
+// minBundle is a minimal ESM bundle that evals arbitrary JS expressions via query param,
 // used by polyfill, crypto, and BFF tests to drive the runtime without a real Astro app.
 var minBundle = []byte(`
-module.exports.default = function(config) {
+export default function(config) {
     return async function handler(request, context) {
         var url = new URL(request.url);
         var expr = url.searchParams.get('expr');
@@ -53,11 +53,11 @@ module.exports.default = function(config) {
             headers: {'content-type': 'application/json'},
         });
     };
-};
+}
 `)
 
 func TestMain(m *testing.M) {
-	bundle, err := os.ReadFile(filepath.Join("testdata", "testapp-ssr", "bundle.cjs"))
+	bundle, err := os.ReadFile(filepath.Join("testdata", "testapp-ssr", "bundle.mjs"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "read testdata bundle: %v\n", err)
 		os.Exit(1)
@@ -460,7 +460,7 @@ func TestGetRandomValues(t *testing.T) {
 }
 
 func TestPolyfillsQJSInit(t *testing.T) {
-	bundle := []byte(`module.exports.default = function() { return async function(req) { return new Response('ok'); }; };`)
+	bundle := []byte(`export default function() { return async function(req) { return new Response('ok'); }; }`)
 	_, err := astroruntime.NewPool(bundle, map[string]string{}, 2)
 	if err != nil {
 		t.Fatalf("pool init failed (polyfill error): %v", err)
@@ -471,7 +471,7 @@ func TestPolyfillsQJSInit(t *testing.T) {
 
 // TestPoolSizeValidation verifies that invalid pool sizes are rejected.
 func TestPoolSizeValidation(t *testing.T) {
-	bundle := []byte(`module.exports.default = function() { return async function(req) { return new Response('ok'); }; };`)
+	bundle := []byte(`export default function() { return async function(req) { return new Response('ok'); }; }`)
 	cases := []struct {
 		size int
 		ok   bool
@@ -497,14 +497,14 @@ func TestPoolSizeValidation(t *testing.T) {
 // rather than null, so JS handlers can distinguish "no body" from "empty body".
 func TestEmptyBodyPOST(t *testing.T) {
 	bundle := []byte(`
-module.exports.default = function() {
+export default function() {
   return async function(req) {
     var body = await req.text();
     return new Response(JSON.stringify({body: body, bodyType: typeof body}), {
       status: 200, headers: {'content-type': 'application/json'},
     });
   };
-};
+}
 `)
 	p, err := astroruntime.NewPool(bundle, map[string]string{}, 1)
 	if err != nil {
@@ -662,9 +662,7 @@ func TestBFFUpstreamFetch(t *testing.T) {
 }
 
 // TestBFFAggregation verifies that BFF can call multiple upstream services concurrently
-// via Promise.allSettled and merge the results. __go_fetchRaw uses SetGoAsyncFunc: each
-// fetch spawns a goroutine and resolves its Promise via the QJS pendingCallbacks channel,
-// so all HTTP requests run in parallel while the event loop drains completions.
+// via Promise.allSettled and merge the results.
 func TestBFFAggregation(t *testing.T) {
 	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -774,7 +772,6 @@ func TestBFFConcurrentFetch(t *testing.T) {
 	}
 
 	t.Logf("3× %v concurrent fetch elapsed: %v", delay, elapsed)
-	// Sequential would be ≥ 3×delay; concurrent should finish in < 2×delay
 	if elapsed >= 3*delay {
 		t.Errorf("fetches appear sequential: elapsed %v ≥ 3×%v; expected concurrent (~1×)", elapsed, delay)
 	}
@@ -900,7 +897,6 @@ func TestBFFUpstreamHMACAuth(t *testing.T) {
 
 // TestTextEncoderInto verifies encodeInto with partial buffer and correct read/written values.
 func TestTextEncoderInto(t *testing.T) {
-	// Full fit: result.written === encoded length, result.read === str.length
 	r := evalExpr(t, minPool, `(function() {
 		var enc = new TextEncoder();
 		var dest = new Uint8Array(20);
@@ -911,7 +907,6 @@ func TestTextEncoderInto(t *testing.T) {
 		t.Errorf("encodeInto full fit: %v", r["result"])
 	}
 
-	// Partial: 3-byte UTF-8 char '中' won't fit in a 2-byte dest
 	r = evalExpr(t, minPool, `(function() {
 		var enc = new TextEncoder();
 		var dest = new Uint8Array(2);
@@ -922,7 +917,6 @@ func TestTextEncoderInto(t *testing.T) {
 		t.Errorf("encodeInto partial multi-byte: %v", r["result"])
 	}
 
-	// Partial: 'ABC中' (3 ASCII + 3 UTF-8 bytes) into 5-byte dest — only 'ABC' fits
 	r = evalExpr(t, minPool, `(function() {
 		var enc = new TextEncoder();
 		var dest = new Uint8Array(5);
