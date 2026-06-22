@@ -8,15 +8,16 @@ Astro 的 Netlify 适配器输出的 `entry.mjs` 不是独立可执行文件：�
 
 ---
 
-## 两种打包模式
+## 三种打包模式
 
-| 模式 | 触发时机 | 是否需要 node_modules | 适用场景 |
-|---|---|---|---|
-| **运行时打包**（`--ssr`） | server 启动时调用 `BundleSSR` | ✅ 需要（esbuild 从磁盘解析依赖） | 本地开发、快速迭代 |
-| **预打包**（`--bundle`） | 构建阶段提前完成，server 直接读文件 | ❌ 不需要 | 生产部署、Docker 镜像 |
+| 模式 | 触发时机 | 是否需要 node_modules | 启动开销 | 适用场景 |
+|---|---|---|---|---|
+| **运行时打包**（`--ssr`） | server 启动时调用 `BundleSSR` | ✅ 需要 | esbuild + QJS 编译 | 本地开发、快速迭代 |
+| **预打包 JS**（`--bundle`） | 构建阶段提前完成，server 直接读 `.mjs` | ❌ 不需要 | QJS 编译（跳过 esbuild）| 生产部署、Docker 镜像 |
+| **预编译字节码**（`--bytecodes`） | 构建阶段完成，server 直接加载 `.jsbc` | ❌ 不需要 | 仅内存映射（跳过 esbuild 和 JS 解析）| 最快冷启动、容器生产环境 |
 
-两种模式产出完全相同结构的 ESM bundle，传入 QJS 的字节内容等价。
-区别仅在于 esbuild 运行的时间点。
+`--ssr` 和 `--bundle` 最终传入 `NewPool` 的 `bundleCode []byte` 内容等价，区别仅在于 esbuild 运行的时间点。  
+`--bytecodes` 完全绕过 JS 层，直接载入已序列化的 QuickJS bytecode 集合，冷启动最快。
 
 ---
 
@@ -139,6 +140,94 @@ shim 源码位于 `js/shims/`，通过 `//go:embed js/shims` 编译进 Go 二进
 
 ---
 
+## 预编译字节码：bundle-ssr-bin / .jsbc
+
+### 动机
+
+`--bundle` 模式消除了 esbuild 的运行时开销，但 server 启动时仍需将 12+ MB 的 JS 文本
+交给 QuickJS 解析、编译为 bytecode，这一步通常需要 1–3 秒。
+
+`bundle-ssr-bin` 命令在构建阶段一次性完成 esbuild + QJS bytecode 编译，
+将结果序列化为 `.jsbc` 文件。server 启动时只需反序列化并载入内存，
+跳过了所有解析和编译，是最快的冷启动模式。
+
+### .jsbc 文件结构
+
+`.jsbc` 使用 Go `encoding/gob` 序列化，包含三部分 bytecode：
+
+| 字段 | 内容 | 说明 |
+|---|---|---|
+| `Polyfills` | `[]{ Name, BC }` | Web API polyfill 的 QJS bytecode（按初始化顺序排列） |
+| `Bundle` | `[]byte` | SSR bundle 的 QJS bytecode（module 模式编译） |
+| `Glue` | `[]byte` | 请求适配层（glue.js）的 QJS bytecode |
+| `Version` | `uint32`（当前为 `1`） | 格式版本，不匹配时拒绝加载 |
+
+文件体积约为对应 `.mjs` 的 2–3 倍（12 MB JS → 31 MB .jsbc），
+因为 .jsbc 额外包含所有 polyfill 和 glue 的 bytecode。
+
+### 命令行用法
+
+```bash
+# 从 entry.mjs（需要 node_modules）直接生成 .jsbc
+astro-runtime bundle-ssr-bin \
+    --entry .netlify/build/entry.mjs \
+    --out   .netlify/build/bundle.jsbc
+
+# 从已有 bundle.mjs（跳过 esbuild）生成 .jsbc
+astro-runtime bundle-ssr-bin \
+    --bundle .netlify/build/bundle.mjs \
+    --out    .netlify/build/bundle.jsbc
+```
+
+默认值（无参数时自动检测）：
+- `--bundle` 存在 → 读取 `.netlify/build/bundle.mjs`
+- 否则 → 读取 `.netlify/build/entry.mjs`（需要 node_modules）
+- `--out` 默认为 `.netlify/build/bundle.jsbc`
+
+`--entry` 和 `--bundle` 互斥，同时指定会报错退出。
+
+### Go API
+
+```go
+// CompileBytecodeSet 将 bundleSrc 编译为 QJS bytecode 集合并写入 outPath。
+// 等价于 bundle-ssr-bin 命令的核心逻辑。
+func CompileBytecodeSet(bundleSrc []byte, outPath string) error
+```
+
+内部创建一个临时 QJS runtime 用于编译，编译完成后立即关闭。
+编译结果通过 `saveCachedBytecodes` 写入磁盘（gob 格式）。
+
+### serve --bytecodes
+
+```bash
+astro-runtime serve \
+    --bytecodes /app/.netlify/build/bundle.jsbc \
+    --dist      /app/dist
+```
+
+等价的 Go 调用：
+
+```go
+pool, err := astroruntime.NewPool(nil,
+    astroruntime.WithEnv(env),
+    astroruntime.WithPrecompiledBytecodes("/app/.netlify/build/bundle.jsbc"),
+)
+```
+
+`WithPrecompiledBytecodes` 优先级高于 `WithBytecodeCache`：
+当两者同时设置时，跳过 hash 检查，直接从指定路径加载。
+
+### 与 WithBytecodeCache 的区别
+
+| | `WithBytecodeCache` | `WithPrecompiledBytecodes` |
+|---|---|---|
+| 触发时机 | server 首次启动时编译并缓存 | 构建阶段预先生成 |
+| 文件命名 | `<sha256>.jsbc`（hash 自动管理） | 用户指定路径 |
+| 过期检测 | bundle + polyfill 内容 hash 变化时自动失效 | 无自动检测，需手动更新 |
+| 适用场景 | 同机复用缓存，避免重复编译 | 构建产物分离，容器镜像部署 |
+
+---
+
 ## 预打包：bundle-ssr.mjs
 
 ### 动机
@@ -232,11 +321,13 @@ pnpm build             # 仅 astro build，产出 entry.mjs
 # server 启动时 esbuild 打包，需要 node_modules 在同目录
 ```
 
-### 生产 Docker 镜像
+### 生产 Docker 镜像（--bundle）
 
 ```bash
 # 宿主机构建
-pnpm build:prod        # astro build + bundle-ssr.mjs → bundle.mjs
+pnpm build             # astro build → entry.mjs
+astro-runtime bundle-ssr --entry .netlify/build/entry.mjs \
+                         --out   .netlify/build/bundle.mjs
 
 # Docker build 只复制两项产物，不含 node_modules
 COPY astro-koharu/dist                       ./astro-koharu/dist
@@ -246,7 +337,24 @@ COPY astro-koharu/.netlify/build/bundle.mjs  ./astro-koharu/.netlify/build/bundl
 CMD ["/app/server", "--bundle", "/app/.netlify/build/bundle.mjs", "--dist", "/app/astro-koharu/dist"]
 ```
 
-镜像中没有 Node.js、pnpm、node_modules，只有 Go 静态二进制 + 静态文件 + 一个 JS 文件。
+### 生产 Docker 镜像（--bytecodes，最快冷启动）
+
+```bash
+# 宿主机构建（两步）
+pnpm build             # astro build → dist/ + entry.mjs
+astro-runtime bundle-ssr-bin --entry .netlify/build/entry.mjs \
+                              --out   .netlify/build/bundle.jsbc
+
+# Docker build 只复制两项产物，不含 node_modules、不含 .mjs
+COPY astro-koharu/dist                         ./astro-koharu/dist
+COPY astro-koharu/.netlify/build/bundle.jsbc   ./astro-koharu/.netlify/build/bundle.jsbc
+
+# 启动命令（跳过 esbuild + JS 解析，最快启动）
+CMD ["/app/server", "--bytecodes", "/app/.netlify/build/bundle.jsbc", "--dist", "/app/astro-koharu/dist"]
+```
+
+镜像中没有 Node.js、pnpm、node_modules，也没有任何 `.mjs` 文件，
+只有 Go 静态二进制 + 静态文件 + 一个 `.jsbc` 字节码文件。
 
 ---
 
@@ -259,3 +367,5 @@ CMD ["/app/server", "--bundle", "/app/.netlify/build/bundle.mjs", "--dist", "/ap
 | `node:http` / `node:https` 返回空 stub | Netlify 适配器不在渲染路径中使用，暂不影响正常功能 |
 | esbuild 版本需与 node_modules 兼容 | 预打包脚本使用 node_modules 中已安装的 esbuild（由 astro/vite 引入），无需单独安装 |
 | bundle 体积约 12–13 MB | 包含所有依赖的内联代码；QJS bytecode 编译后常驻内存，不影响请求延迟 |
+| `.jsbc` 体积约 30–32 MB | 比 `.mjs` 大 2–3 倍，因为包含了 polyfill 和 glue 的 bytecode；仅在启动时读取一次 |
+| `.jsbc` 格式版本绑定 | `Version = 1`，Go 二进制升级后（polyfill 变化）需重新运行 `bundle-ssr-bin` 生成新文件 |

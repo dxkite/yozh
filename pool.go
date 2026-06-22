@@ -14,13 +14,14 @@ import (
 
 // poolConfig holds resolved configuration for NewPool.
 type poolConfig struct {
-	env              map[string]string
-	size             int
-	memoryLimit      int
-	maxStackSize     int
-	maxExecutionTime int
-	gcThreshold      int
-	bytecodeCacheDir string
+	env                 map[string]string
+	size                int
+	memoryLimit         int
+	maxStackSize        int
+	maxExecutionTime    int
+	gcThreshold         int
+	bytecodeCacheDir    string
+	precompiledBCPath   string
 }
 
 // PoolOption configures a QJS runtime pool.
@@ -57,6 +58,13 @@ func WithGCThreshold(bytes int) PoolOption {
 	return func(c *poolConfig) { c.gcThreshold = bytes }
 }
 
+// WithPrecompiledBytecodes loads a pre-compiled .jsbc bytecode set from path,
+// skipping JS parsing and esbuild entirely. Produced by the bundle-ssr-bin command.
+// Takes precedence over WithBytecodeCache.
+func WithPrecompiledBytecodes(path string) PoolOption {
+	return func(c *poolConfig) { c.precompiledBCPath = path }
+}
+
 // WithBytecodeCache enables bytecode disk caching in dir.
 // The cache key is SHA256 of bundle + all embedded polyfill sources, so any
 // change to the bundle or a Go rebuild (polyfill update) produces a cache miss.
@@ -76,16 +84,17 @@ type pooledRuntime struct {
 
 // Pool manages a set of pre-warmed QJS runtimes and a fixed-size eval worker pool.
 type Pool struct {
-	pool             chan *pooledRuntime
-	workers          chan func()
-	bundleCode       []byte
-	bcs              *bytecodeSet
-	bcsOnce          sync.Once
-	bcsErr           error
-	env              map[string]string
-	qjsOpt           qjs.Option
-	bytecodeCacheDir string
-	rtMu             sync.Mutex // serializes lazy runtime creation
+	pool                chan *pooledRuntime
+	workers             chan func()
+	bundleCode          []byte
+	bcs                 *bytecodeSet
+	bcsOnce             sync.Once
+	bcsErr              error
+	env                 map[string]string
+	qjsOpt              qjs.Option
+	bytecodeCacheDir    string
+	precompiledBCPath   string
+	rtMu                sync.Mutex // serializes lazy runtime creation
 }
 
 // NewPool creates a pool of QJS runtimes, each initialized with:
@@ -122,11 +131,12 @@ func NewPool(bundleCode []byte, opts ...PoolOption) (*Pool, error) {
 	}
 
 	p := &Pool{
-		pool:             make(chan *pooledRuntime, size),
-		workers:          make(chan func(), size*2),
-		bundleCode:       bundleCode,
-		env:              env,
-		bytecodeCacheDir: cfg.bytecodeCacheDir,
+		pool:              make(chan *pooledRuntime, size),
+		workers:           make(chan func(), size*2),
+		bundleCode:        bundleCode,
+		env:               env,
+		bytecodeCacheDir:  cfg.bytecodeCacheDir,
+		precompiledBCPath: cfg.precompiledBCPath,
 		qjsOpt: qjs.Option{
 			MemoryLimit:      cfg.memoryLimit,
 			MaxStackSize:     cfg.maxStackSize,
@@ -163,9 +173,16 @@ func (p *Pool) newRuntime() (*pooledRuntime, error) {
 	}
 
 	p.bcsOnce.Do(func() {
+		if p.precompiledBCPath != "" {
+			p.bcs, p.bcsErr = loadCachedBytecodes(p.precompiledBCPath)
+			if p.bcsErr == nil {
+				log.Printf("precompiled bytecodes loaded: %s", p.precompiledBCPath)
+			}
+			return
+		}
 		if p.bytecodeCacheDir != "" {
 			key := cacheKey(p.bundleCode)
-			cachePath := filepath.Join(p.bytecodeCacheDir, key+".bc")
+			cachePath := filepath.Join(p.bytecodeCacheDir, key+".jsbc")
 			if bcs, err := loadCachedBytecodes(cachePath); err == nil {
 				log.Printf("bytecode cache hit: %s", cachePath)
 				p.bcs = bcs
@@ -175,7 +192,7 @@ func (p *Pool) newRuntime() (*pooledRuntime, error) {
 		p.bcs, p.bcsErr = compileBytecodes(rt.Context(), p.bundleCode)
 		if p.bcsErr == nil && p.bytecodeCacheDir != "" {
 			key := cacheKey(p.bundleCode)
-			cachePath := filepath.Join(p.bytecodeCacheDir, key+".bc")
+			cachePath := filepath.Join(p.bytecodeCacheDir, key+".jsbc")
 			if mkErr := os.MkdirAll(p.bytecodeCacheDir, 0755); mkErr == nil {
 				if saveErr := saveCachedBytecodes(cachePath, p.bcs); saveErr == nil {
 					log.Printf("bytecode cache saved: %s", cachePath)

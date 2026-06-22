@@ -11,6 +11,22 @@ import (
 	"github.com/dxkite/qjs"
 )
 
+// CompileBytecodeSet bundles bundleSrc as a QJS bytecode set (polyfills + bundle + glue)
+// and writes the serialized result to outPath.
+// The output can be loaded by NewPool with WithPrecompiledBytecodes to skip JS parsing on startup.
+func CompileBytecodeSet(bundleSrc []byte, outPath string) error {
+	rt, err := qjs.New(qjs.Option{})
+	if err != nil {
+		return fmt.Errorf("qjs runtime: %w", err)
+	}
+	defer rt.Close()
+	bcs, err := compileBytecodes(rt.Context(), bundleSrc)
+	if err != nil {
+		return err
+	}
+	return saveCachedBytecodes(outPath, bcs)
+}
+
 const bcFormatVersion uint32 = 1
 
 // serializedPolyfill is the gob-encodable form of polyfillEntry.
