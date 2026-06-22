@@ -23,9 +23,10 @@ go build -o astro-runtime.exe ./cmd
 
 # 在已有 Astro + Netlify 项目中运行（先 astro build）
 ./astro-runtime.exe \
-  --ssr .netlify/build/entry.mjs \
-  --dist dist \
-  --port 8888
+  -ssr .netlify/build/entry.mjs \
+  -dist dist \
+  -port 8888
+# 字节码缓存默认开启（$XDG_CACHE_HOME/astro-runtime），-cache-dir="" 禁用
 ```
 
 ## 示例应用
@@ -34,8 +35,8 @@ go build -o astro-runtime.exe ./cmd
 
 ```bash
 ./astro-runtime.exe \
-  --ssr examples/testapp-ssr/.netlify/build/entry.mjs \
-  --dist examples/testapp-ssr/dist
+  -ssr examples/testapp-ssr/.netlify/build/entry.mjs \
+  -dist examples/testapp-ssr/dist
 ```
 
 测试路由：

@@ -1,10 +1,13 @@
 package astroruntime
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 )
 
@@ -19,6 +22,12 @@ func StartServer(pool *Pool, distDir, addr string) error {
 		HandleImageCDN(distDir, w, r)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if v := recover(); v != nil {
+				log.Printf("panic: %v\n%s", v, debug.Stack())
+				http.Error(w, fmt.Sprintf("internal server error: %v", v), http.StatusInternalServerError)
+			}
+		}()
 		// path.Clean keeps forward slashes (safe on all OS); strip leading slash
 		// so filepath.Join treats it as relative and never overrides distDir.
 		urlPath := path.Clean(r.URL.Path)

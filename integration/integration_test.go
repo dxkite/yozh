@@ -63,19 +63,23 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	sharedPool, err = astroruntime.NewPool(bundle, map[string]string{"NODE_ENV": "production"}, 4)
+	sharedPool, err = astroruntime.NewPool(bundle,
+		astroruntime.WithEnv(map[string]string{"NODE_ENV": "production"}),
+		astroruntime.WithSize(4))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "NewPool sharedPool: %v\n", err)
 		os.Exit(1)
 	}
 
-	sessionPool, err = astroruntime.NewPool(bundle, map[string]string{"NODE_ENV": "production"}, 1)
+	sessionPool, err = astroruntime.NewPool(bundle,
+		astroruntime.WithEnv(map[string]string{"NODE_ENV": "production"}),
+		astroruntime.WithSize(1))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "NewPool sessionPool: %v\n", err)
 		os.Exit(1)
 	}
 
-	minPool, err = astroruntime.NewPool(minBundle, map[string]string{}, 4)
+	minPool, err = astroruntime.NewPool(minBundle, astroruntime.WithSize(4))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "NewPool minPool: %v\n", err)
 		os.Exit(1)
@@ -461,7 +465,7 @@ func TestGetRandomValues(t *testing.T) {
 
 func TestPolyfillsQJSInit(t *testing.T) {
 	bundle := []byte(`export default function() { return async function(req) { return new Response('ok'); }; }`)
-	_, err := astroruntime.NewPool(bundle, map[string]string{}, 2)
+	_, err := astroruntime.NewPool(bundle, astroruntime.WithSize(2))
 	if err != nil {
 		t.Fatalf("pool init failed (polyfill error): %v", err)
 	}
@@ -476,14 +480,14 @@ func TestPoolSizeValidation(t *testing.T) {
 		size int
 		ok   bool
 	}{
-		{0, false},
+		{0, true}, // 0 = auto-detect (clamp(NumCPU, 2, 8))
 		{-1, false},
 		{1001, false},
 		{1, true},
 		{1000, true},
 	}
 	for _, c := range cases {
-		_, err := astroruntime.NewPool(bundle, map[string]string{}, c.size)
+		_, err := astroruntime.NewPool(bundle, astroruntime.WithSize(c.size))
 		if c.ok && err != nil {
 			t.Errorf("size=%d: unexpected error: %v", c.size, err)
 		}
@@ -506,7 +510,7 @@ export default function() {
   };
 }
 `)
-	p, err := astroruntime.NewPool(bundle, map[string]string{}, 1)
+	p, err := astroruntime.NewPool(bundle, astroruntime.WithSize(1))
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}

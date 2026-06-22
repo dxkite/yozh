@@ -6,16 +6,30 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	astroruntime "github.com/dxkite/astro-runtime"
+	"github.com/dxkite/astro-runtime/trace"
 )
 
+func defaultCacheDir() string {
+	d, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(d, "astro-runtime")
+}
+
 func main() {
-	port    := flag.Int("port", 8888, "port to listen on")
-	ssrPath := flag.String("ssr", ".netlify/build/entry.mjs", "path to built SSR entry .mjs")
-	distDir := flag.String("dist", "dist", "path to Astro's built static output directory")
+	port      := flag.Int("port", 8888, "port to listen on")
+	ssrPath   := flag.String("ssr", ".netlify/build/entry.mjs", "path to built SSR entry .mjs")
+	distDir   := flag.String("dist", "dist", "path to Astro's built static output directory")
+	traceFlag := flag.Bool("trace", false, "print per-request span timing to stderr")
+	cacheDir  := flag.String("cache-dir", defaultCacheDir(), "bytecode cache directory (empty string to disable)")
 	flag.Parse()
+
+	if *traceFlag {
+		trace.Enable()
+	}
 
 	absSSR, err := filepath.Abs(*ssrPath)
 	if err != nil {
@@ -40,16 +54,12 @@ func main() {
 		log.Printf("Bundle content (small, dumping): %s", string(bundleCode))
 	}
 
-	poolSize := runtime.NumCPU()
-	if poolSize < 2 {
-		poolSize = 2
+	log.Printf("Initializing QJS pool ...")
+	poolOpts := []astroruntime.PoolOption{astroruntime.WithEnv(envMap())}
+	if *cacheDir != "" {
+		poolOpts = append(poolOpts, astroruntime.WithBytecodeCache(*cacheDir))
 	}
-	if poolSize > 8 {
-		poolSize = 8
-	}
-
-	log.Printf("Initializing QJS pool (%d runtimes) ...", poolSize)
-	pool, err := astroruntime.NewPool(bundleCode, envMap(), poolSize)
+	pool, err := astroruntime.NewPool(bundleCode, poolOpts...)
 	if err != nil {
 		log.Fatalf("pool init: %v", err)
 	}

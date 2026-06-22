@@ -81,15 +81,27 @@ func setupRuntimeLegacy(rt *qjs.Runtime, bundleCode []byte, env map[string]strin
 
 // newPoolLegacy creates a pool using source code eval (old approach), for benchmark comparison.
 func newPoolLegacy(bundleCode []byte, env map[string]string, size int) (*Pool, error) {
-	inner := qjs.NewPool(size, qjs.Option{}, func(rt *qjs.Runtime) error {
-		return setupRuntimeLegacy(rt, bundleCode, env)
-	})
-	rt, err := inner.Get()
+	p := &Pool{
+		pool:    make(chan *pooledRuntime, size),
+		workers: make(chan func(), size*2),
+	}
+	for i := 0; i < size; i++ {
+		go func() {
+			for fn := range p.workers {
+				fn()
+			}
+		}()
+	}
+	rt, err := qjs.New(qjs.Option{})
 	if err != nil {
 		return nil, err
 	}
-	inner.Put(rt)
-	return &Pool{inner: inner}, nil
+	if err := setupRuntimeLegacy(rt, bundleCode, env); err != nil {
+		rt.Close()
+		return nil, err
+	}
+	p.pool <- &pooledRuntime{rt: rt}
+	return p, nil
 }
 
 // ── NewPool end-to-end: size=1 ────────────────────────────────────────────────
@@ -111,7 +123,7 @@ func BenchmarkNewPoolLegacySize1(b *testing.B) {
 func BenchmarkNewPoolBytecodeSize1(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		p, err := NewPool(benchBundleSrc, map[string]string{}, 1)
+		p, err := NewPool(benchBundleSrc, WithSize(1))
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -139,7 +151,7 @@ func BenchmarkNewPoolLegacySize4(b *testing.B) {
 func BenchmarkNewPoolBytecodeSize4(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		p, err := NewPool(benchBundleSrc, map[string]string{}, 4)
+		p, err := NewPool(benchBundleSrc, WithSize(4))
 		if err != nil {
 			b.Fatal(err)
 		}

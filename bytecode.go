@@ -1,10 +1,85 @@
 package astroruntime
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/gob"
+	"encoding/hex"
 	"fmt"
+	"os"
 
 	"github.com/dxkite/qjs"
 )
+
+const bcFormatVersion uint32 = 1
+
+// serializedPolyfill is the gob-encodable form of polyfillEntry.
+type serializedPolyfill struct {
+	Name string
+	BC   []byte
+}
+
+// serializedBytecodeSet is the on-disk representation of bytecodeSet.
+type serializedBytecodeSet struct {
+	Version   uint32
+	Polyfills []serializedPolyfill
+	Bundle    []byte
+	Glue      []byte
+}
+
+// cacheKey returns the SHA256 hex of all bytecode compilation inputs.
+// Any change to the bundle, polyfills, or glue produces a new key,
+// guaranteeing stale bytecodes are never loaded from cache.
+func cacheKey(bundleCode []byte) string {
+	h := sha256.New()
+	h.Write(bundleCode)
+	for _, src := range []string{
+		webAPIPolyfill, cryptoPolyfill, filePolyfill,
+		envAPIStub, intlStub, structuredCloneGuard, consoleDef, fetchDef,
+		glueJS,
+	} {
+		h.Write([]byte(src))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// saveCachedBytecodes encodes bcs to disk at path using gob encoding.
+func saveCachedBytecodes(path string, bcs *bytecodeSet) error {
+	sbs := serializedBytecodeSet{
+		Version: bcFormatVersion,
+		Bundle:  bcs.bundle,
+		Glue:    bcs.glue,
+	}
+	for _, p := range bcs.polyfills {
+		sbs.Polyfills = append(sbs.Polyfills, serializedPolyfill{Name: p.name, BC: p.bc})
+	}
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(sbs); err != nil {
+		return err
+	}
+	return os.WriteFile(path, buf.Bytes(), 0644)
+}
+
+// loadCachedBytecodes reads and decodes a bytecodeSet from path.
+// Returns an error if the file is missing, corrupt, or has a version mismatch.
+func loadCachedBytecodes(path string) (*bytecodeSet, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var sbs serializedBytecodeSet
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&sbs); err != nil {
+		return nil, err
+	}
+	if sbs.Version != bcFormatVersion {
+		return nil, fmt.Errorf("bytecode cache version mismatch: got %d, want %d", sbs.Version, bcFormatVersion)
+	}
+	bcs := &bytecodeSet{bundle: sbs.Bundle, glue: sbs.Glue}
+	for _, p := range sbs.Polyfills {
+		bcs.polyfills = append(bcs.polyfills, polyfillEntry{name: p.Name, bc: p.BC})
+	}
+	return bcs, nil
+}
 
 type polyfillEntry struct {
 	name string

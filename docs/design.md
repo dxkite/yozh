@@ -39,24 +39,25 @@ server.go — 路由分发
                     ▼
                QJS (dxkite/qjs → QuickJS-NG via wazero)
                  ├── js/         — Web API polyfills（8 个 JS 文件，//go:embed 嵌入）
-                 ├── bundle CJS  — Astro SSR bundle（esbuild 打包，内存加载）
-                 └── glue.js     — __handleRequest: JSON → Request → __ssrHandler → JSON
-                    │
+                 ├── bundle CJS  — Astro SSR bundle（esbuild 打包；字节码缓存至磁盘）
+                 └── glue.js     — __handleRequest: JSON → Request → __ssrHandler → 流式输出
+                    │  __go_sendHeaders / __go_sendChunk / __go_endStream
                     ▼
-               Go: 解析 JSON 响应 → 写入 HTTP 响应
+               Go: 流式写入 HTTP 响应（headers → chunks → done）
 ```
 
 ## 核心组件
 
 | 文件 | 职责 |
 |---|---|
-| `cmd/main.go` | CLI 入口，串联所有组件 |
+| `cmd/main.go` | CLI 入口，串联所有组件（`-ssr`、`-dist`、`-port`、`-cache-dir`、`-trace`） |
 | `bundle.go` | esbuild 打包 `.mjs` → CJS 内存字节 |
+| `bytecode.go` | 字节码磁盘缓存：SHA256 key、gob 序列化、load/save |
 | `runtime.go` | QJS Pool 初始化，注入 host functions，eval polyfills + bundle + glue |
 | `polyfills.go` | `//go:embed` 声明，将 `js/` 下的 JS 文件嵌入二进制 |
 | `crypto_subtle.go` | Web Crypto API Go 实现（digest、HMAC、AES-GCM/CBC、JWK 导入导出） |
-| `glue.js` | Go↔QJS 桥接，定义 `globalThis.__handleRequest` |
-| `handler.go` | 单次请求处理：序列化、调用 QJS、反序列化 |
+| `glue.js` | Go↔QJS 桥接，定义 `globalThis.__handleRequest`，流式输出 headers/chunks |
+| `handler.go` | 单次请求处理：序列化、调用 QJS、按 sigHeader/sigChunk/sigDone 流式写响应 |
 | `images.go` | `/.netlify/images` 图像 CDN：参数解析、解码、resize/crop、编码 |
 | `server.go` | HTTP 路由：图像 CDN → 静态文件 → SSR fallback |
 
@@ -70,6 +71,9 @@ server.go — 路由分发
    ├── __go_cryptoRandomBytes(n) → Go crypto/rand → ArrayBuffer
    ├── __go_consoleWrite(level, msg) → Go stderr
    ├── __go_fetchRaw(url, method, headers, body) → Go http.Client（async）
+   ├── __go_sendHeaders(status, headersJSON) → 流式：立即写 HTTP status + headers
+   ├── __go_sendChunk(arrayBuffer) → 流式：写一个 body chunk 并 Flush
+   ├── __go_endStream(traceJSON) → 流式：标记结束，携带 trace spans
    │
    ├── injectBinaryOps()
    │   ├── __go_textEncodeUTF8(str) → ArrayBuffer
@@ -173,20 +177,36 @@ Go 调用 `ctx.Eval("...", qjs.Code(code))` 传入 JS 代码字符串。
 最终拼接成 `await __handleRequest("...{escaped JSON}...")` 的 JS 代码片段，
 确保 payload 中任意字节（含引号、换行、Unicode）都能安全传入 QJS。
 
-### 5. AsyncIterable body 消费（流式收集）
+### 5. AsyncIterable body 流式传输
 
-当 `isNode = true`，Astro 的 `renderPage` 返回的 Response body 是 `AsyncIterable<Uint8Array>`。
-`Response.text()` 将全部 chunk 的字节收集到 `allBytes[]`，一次性 UTF-8 解码，
-避免跨 chunk 边界截断多字节 UTF-8 序列：
+当 `isNode = true`，Astro 的 `renderPage` 返回的 Response body 是 `AsyncIterable<Uint8Array>`（或 ReadableStream）。
+glue.js 不再缓冲全部 body，而是逐 chunk 通过 `__go_sendChunk` 推给 Go，实现真正的流式传输：
 
 ```javascript
-var allBytes = [];
-for await (var chunk of b) {
-  var u8 = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk.buffer, ...);
-  for (var j = 0; j < u8.length; j++) allBytes.push(u8[j]);
+__go_sendHeaders(response.status, JSON.stringify(respHeaders));
+
+var b = response._body;
+if (typeof b.getReader === 'function') {
+  // ReadableStream 路径
+  var reader = b.getReader();
+  while (true) {
+    var r = await reader.read();
+    if (r.done) break;
+    if (r.value && r.value.length > 0)
+      __go_sendChunk(r.value.buffer);
+  }
+} else if (b[Symbol.asyncIterator] != null) {
+  // AsyncIterable 路径（Astro renderToAsyncIterable，最常见）
+  for await (var chunk of b)
+    if (chunk && chunk.length > 0)
+      __go_sendChunk(typeof chunk === 'string' ? _enc.encode(chunk).buffer : chunk.buffer);
 }
-return __go_textDecodeUTF8(__go_bufToB64(JSON.stringify(allBytes)));
+
+__go_endStream(JSON.stringify(_spans));
 ```
+
+Go 端 handler.go 通过带缓冲的 channel（size=4）接收 `sigHeader` / `sigChunk` / `sigDone` 三类信号，
+写入 HTTP 响应并 Flush，实现客户端渐进接收。
 
 ### 6. 二进制数据跨边界传输（base64 + JSON）
 
@@ -233,17 +253,23 @@ JS: fetch(url)
   → SetGoAsyncFunc goroutine 启动，执行 HTTP 请求（不接触 WASM）
   → 完成后写入 Context.pendingCallbacks chan func()
 
-JS: Await() 轮询循环（在 QJS goroutine 上）：
+QJS_Eval（async 路径）：
+  load_buf → Promise P（pending）
+  QJS_DrainEventLoop → 一次 WASM 调用跑完所有纯 JS microtask
+  若 Promise 已 fulfilled 则直接返回（无需 Go Await）
+  若仍 pending（Go 异步函数未完成）→ 返回 Promise 给 Go
+
+Go Await() 循环（仅 pending 时触发）：
   drain pendingCallbacks → 调用 promise.Resolve/Reject（WASM 安全）
-  运行 QJS_ExecutePendingJob 直到返回 ≤ 0
+  QJS_DrainEventLoop → 一次 WASM 调用跑完反应链 microtask
   检查 QJS_IsPromisePending → settled 则退出
 ```
 
 `dxkite/qjs` 在上游基础上增加了：
 - `Context.pendingCallbacks chan func()`（容量 64）
 - `SetGoAsyncFunc(name string, fn func(*This))` / `RunAsync(promise *Value, fn func() (*Value, error))`
-- C 导出 `QJS_ExecutePendingJob` / `QJS_IsPromisePending`（`qjswasm/helpers.c`）
-- `eval.c` 中移除 `js_std_await`，由 Go 端 `Await()` 统一驱动 Promise 解析
+- C 导出 `QJS_DrainEventLoop`（批量 `JS_ExecutePendingJob`）、`QJS_ExecutePendingJob`、`QJS_IsPromisePending`
+- `eval.c`：async eval 用 `QJS_DrainEventLoop`，sync eval 保留 `js_std_loop`（支持 `os.setTimeout`）
 
 ## 数据流
 
@@ -263,16 +289,39 @@ QJS: __ssrHandler(request, context)
     │ renderToAsyncIterable → AsyncGenerator<Uint8Array>
     │ new Response(asyncIterable, {status, headers})
     ▼
-QJS: response.text() → 收集全部字节 → __go_textDecodeUTF8 → string
-    │ JSON.stringify({status, headers, body})
+QJS: glue.js 流式输出
+    │ __go_sendHeaders(status, headersJSON)  ──► Go: WriteHeader → 客户端收到 headers
+    │ for await chunk of body:
+    │   __go_sendChunk(chunk.buffer)         ──► Go: Write + Flush → 客户端渐进接收
+    │ __go_endStream(traceJSON)              ──► Go: 记录 trace，handler 返回
     ▼
-Go: json.Unmarshal → responsePayload
-    │ w.Header().Add / w.WriteHeader / fmt.Fprint
-    ▼
-Go HTTP Response
+Go HTTP Response（流式 Chunked Transfer）
 ```
 
-### 10. 图像 CDN：AVIF 降级与 WebP 输出策略
+### 10. 字节码磁盘缓存
+
+每次进程启动都要对 ~12 MB 的 bundle 执行 `compileBytecodes()`（约 1.5s）。
+`bytecode.go` 以 SHA256(bundle || polyfills || glue) 为 key，将 `bytecodeSet` gob 序列化到磁盘：
+
+```
+$cache_dir/<sha256>.bc  — gob: [{Name, BC[]byte}...] + Bundle BC + Glue BC
+```
+
+重启命中缓存时跳过编译，冷启动延迟从 ~1.5s 降至 <100ms。
+bundle 或 polyfill 任意字节变化 → key 不同 → cache miss → 重新编译并写入新文件。
+
+### 11. QJS 事件循环优化（`QJS_DrainEventLoop`）
+
+原实现中，Go 的 `Await()` 在 `for` 循环里逐个调用 `QJS_ExecutePendingJob`（每次 Go→WASM 往返 ~550µs），
+Astro SSR 一次请求产生约 5322 个 microtask，合计约 2.93s 的纯 overhead。
+
+优化后：
+- C 侧导出 `QJS_DrainEventLoop`：在单次 WASM 调用内跑完所有 `JS_ExecutePendingJob`。
+- `QJS_Eval`（async 路径）：调用 `QJS_DrainEventLoop` 后若 Promise 已 fulfilled，直接返回值给 Go。
+- Go `Await()`：仅在 Promise 仍 pending（Go 异步函数未完成）时触发，每轮一次 `QJS_DrainEventLoop`。
+- 结果：`runtime.done - response.done` gap 从 **2.93s → ~10µs**。
+
+### 12. 图像 CDN：AVIF 降级与 WebP 输出策略
 
 `@astrojs/netlify` 的 `image-service.js` 将所有 `<Image />` URL 改写为
 `/.netlify/images?url=...&fm=...&w=...&h=...&q=...&fit=...`。
@@ -294,10 +343,10 @@ Go HTTP Response
 | 项目 | 说明 |
 |---|---|
 | 状态共享 | Pool 中每个 runtime 持有独立 JS heap，模块级变量跨请求保留但不跨 runtime 共享 |
-| 流式响应 | 当前收集全部 body 再返回，不支持 HTTP 流式传输（Chunked Transfer） |
+| 流式响应 | 已支持：headers 就绪后立即推送，body 按 chunk 流式写入（Chunked Transfer） |
 | WebAssembly | QJS 中 WebAssembly stub 永远返回不支持 |
-| setTimeout 精度 | 非零 delay 的 setTimeout 立即执行（用 microtask 模拟），SSR 路径通常无影响 |
-| 二进制响应 | Response body 为字符串，图片/PDF 等二进制资源应走静态文件路由，不经 SSR |
+| setTimeout（sync eval） | sync eval 通过 `js_std_loop` 正确处理 `os.setTimeout` 回调；async SSR eval 只跑 microtask，不等 OS timer |
+| 二进制响应 | Response body 为 ArrayBuffer chunk，图片/PDF 等二进制资源应走静态文件路由，不经 SSR |
 | 图像 AVIF 变换 | AVIF 源文件无法解码（无纯 Go 实现），直接 ServeFile 原始文件，不执行 resize/crop |
 | 图像 WebP 输出 | `fm=webp`/`fm=avif` 请求降级为 JPEG 输出，格式与请求不符 |
 
@@ -305,7 +354,7 @@ Go HTTP Response
 
 | 依赖 | 版本 | 用途 |
 |---|---|---|
-| `github.com/dxkite/qjs` | v0.0.0-20260621013206-c1dcd337bac8 | QuickJS-NG via wazero（纯 Go，无 CGO）；增加 `pendingCallbacks` channel、`SetGoAsyncFunc`、`RunAsync`、`QJS_ExecutePendingJob` / `QJS_IsPromisePending` WASM 导出；注册函数 API 改为 `SetGoFunc` / `SetGoAsyncFunc` |
+| `github.com/dxkite/qjs` | local (x062201) | QuickJS-NG via wazero（纯 Go，无 CGO）；新增 `QJS_DrainEventLoop`（批量 microtask）、`pendingCallbacks` channel、`SetGoAsyncFunc`、`RunAsync`；async eval 用 `QJS_DrainEventLoop`，sync eval 保留 `js_std_loop` |
 | `github.com/tetratelabs/wazero` | v1.9.0 | WebAssembly 运行时（qjs 间接依赖） |
 | `github.com/evanw/esbuild` | v0.25.0 | in-process JS 打包 |
 | `golang.org/x/image` | v0.43.0 | WebP 图像解码（`webp` 子包）；`draw.BiLinear` 双线性缩放（`draw` 子包） |
@@ -314,13 +363,16 @@ Go HTTP Response
 
 ```bash
 astro-runtime \
-  --ssr .netlify/build/entry.mjs \
-  --dist dist \
-  --port 8888
+  -ssr .netlify/build/entry.mjs \
+  -dist dist \
+  -port 8888 \
+  -cache-dir /tmp/astro-cache   # 可选，留空禁用缓存
 ```
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--ssr` | `.netlify/v1/functions/ssr/ssr.mjs` | SSR entry 路径 |
-| `--dist` | `dist` | Astro 静态输出目录 |
-| `--port` | `8888` | 监听端口 |
+| `-ssr` | `.netlify/build/entry.mjs` | SSR entry 路径 |
+| `-dist` | `dist` | Astro 静态输出目录 |
+| `-port` | `8888` | 监听端口 |
+| `-cache-dir` | `$XDG_CACHE_HOME/astro-runtime` | 字节码磁盘缓存目录（空字符串禁用） |
+| `-trace` | false | 打印每次请求的 span 耗时到 stderr |

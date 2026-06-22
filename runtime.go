@@ -7,29 +7,38 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sync"
+	"time"
 
+	"github.com/dxkite/astro-runtime/trace"
 	"github.com/dxkite/qjs"
 )
 
-// responseMeta holds the status code and serialized headers from a JS response,
-// stored by __go_storeResponseMeta and consumed by loadAndDeleteResponseMeta.
+// signalKind tags each ResponseSignal to distinguish header, chunk, done, and error events.
+type signalKind uint8
+
+const (
+	sigHeader signalKind = iota // JS sent response headers; handler writes status + headers
+	sigChunk                    // JS produced a body chunk; handler writes and flushes it
+	sigDone                     // body fully consumed; handler records trace and returns
+	sigError                    // eval error; handler sends 5xx
+)
+
+// responseMeta holds the status code and serialized headers from a JS response.
 type responseMeta struct {
 	Status      int
 	HeadersJSON string
 }
 
-// runtimeMetas maps each *qjs.Runtime to its pending responseMeta.
-// Each runtime is exclusive per-request (Pool guarantees this), so there is
-// never a concurrent write to the same key.
-var runtimeMetas sync.Map // key: *qjs.Runtime, value: responseMeta
-
-// loadAndDeleteResponseMeta retrieves and removes the responseMeta stored for rt.
-// Returns a zero-value responseMeta if none was stored (e.g. on error paths).
-func loadAndDeleteResponseMeta(rt *qjs.Runtime) responseMeta {
-	v, _ := runtimeMetas.LoadAndDelete(rt)
-	m, _ := v.(responseMeta)
-	return m
+// ResponseSignal carries streaming events from the JS goroutine to HandleSSR.
+// One sigHeader is sent first, then zero or more sigChunk signals, then sigDone.
+// sigError may be sent at any point if the JS eval fails.
+type ResponseSignal struct {
+	Kind          signalKind
+	Meta          responseMeta         // sigHeader
+	Chunk         []byte               // sigChunk
+	Err           error                // sigError
+	JSCheckpoints []trace.JSCheckpoint // sigDone
+	BodyTime      time.Time            // sigHeader: time.Now() when headers are ready
 }
 
 //go:embed glue.js
@@ -37,7 +46,8 @@ var glueJS string
 
 // setupRuntime initializes a single QJS runtime using pre-compiled bytecodes.
 // Order is critical: host functions → polyfills → ESM bundle → handler setup → glue.
-func setupRuntime(rt *qjs.Runtime, bcs *bytecodeSet, env map[string]string) error {
+func setupRuntime(prt *pooledRuntime, bcs *bytecodeSet, env map[string]string) error {
+	rt := prt.rt
 	ctx := rt.Context()
 	keyReg := make(map[string]*cryptoKey)
 
@@ -46,17 +56,56 @@ func setupRuntime(rt *qjs.Runtime, bcs *bytecodeSet, env map[string]string) erro
 		return fmt.Errorf("host functions: %w", err)
 	}
 
-	// __go_storeResponseMeta(statusCode, headersJSON) — stores the response status and
-	// headers JSON in runtimeMetas so that HandleSSR can retrieve them after Eval returns.
-	// The response body is returned directly as the __handleRequest return value,
-	// avoiding JSON.stringify({status, headers, body: "220KB"}) in glue.js (~0.5s saved).
-	ctx.SetGoFunc("__go_storeResponseMeta", func(_ context.Context, args ...any) (any, error) {
+	// __go_sendHeaders(status, headersJSON) — first streaming event; signals HandleSSR to write
+	// HTTP status and headers immediately, before body chunks are available.
+	ctx.SetGoFunc("__go_sendHeaders", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 2 {
 			return nil, nil
 		}
 		status, _ := args[0].(int64)
 		headersJSON, _ := args[1].(string)
-		runtimeMetas.Store(rt, responseMeta{Status: int(status), HeadersJSON: headersJSON})
+		if ch := prt.streamCh; ch != nil {
+			ch <- ResponseSignal{
+				Kind:     sigHeader,
+				Meta:     responseMeta{Status: int(status), HeadersJSON: headersJSON},
+				BodyTime: time.Now(),
+			}
+		}
+		return nil, nil
+	})
+
+	// __go_sendChunk(buf ArrayBuffer) — streams one body chunk to HandleSSR.
+	// Blocks until HandleSSR reads the chunk, providing natural back-pressure.
+	ctx.SetGoFunc("__go_sendChunk", func(_ context.Context, args ...any) (any, error) {
+		if len(args) < 1 {
+			return nil, nil
+		}
+		var chunk []byte
+		switch v := args[0].(type) {
+		case []byte:
+			chunk = v
+		case string:
+			chunk = []byte(v)
+		}
+		if len(chunk) > 0 {
+			if ch := prt.streamCh; ch != nil {
+				ch <- ResponseSignal{Kind: sigChunk, Chunk: chunk}
+			}
+		}
+		return nil, nil
+	})
+
+	// __go_endStream(traceJSON) — final streaming event; HandleSSR records trace and returns.
+	ctx.SetGoFunc("__go_endStream", func(_ context.Context, args ...any) (any, error) {
+		var points []trace.JSCheckpoint
+		if len(args) > 0 {
+			if s, _ := args[0].(string); s != "" {
+				points = parseJSTrace(s)
+			}
+		}
+		if ch := prt.streamCh; ch != nil {
+			ch <- ResponseSignal{Kind: sigDone, JSCheckpoints: points}
+		}
 		return nil, nil
 	})
 
@@ -108,6 +157,28 @@ func setupRuntime(rt *qjs.Runtime, bcs *bytecodeSet, env map[string]string) erro
 	v.Free()
 
 	return nil
+}
+
+// parseJSTrace decodes the JSON trace emitted by glue.js into JSCheckpoint slices.
+// Format: [{name: string, s: epochMs, e: epochMs}, ...]
+func parseJSTrace(jsonStr string) []trace.JSCheckpoint {
+	var raw []struct {
+		Name string `json:"name"`
+		S    int64  `json:"s"`
+		E    int64  `json:"e"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		return nil
+	}
+	out := make([]trace.JSCheckpoint, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, trace.JSCheckpoint{
+			Name:  r.Name,
+			Start: time.UnixMilli(r.S),
+			End:   time.UnixMilli(r.E),
+		})
+	}
+	return out
 }
 
 // injectHostFunctions registers Go-backed globals on the QJS context.
