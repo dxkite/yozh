@@ -8,7 +8,7 @@ require (
 	golang.org/x/image v0.43.0
 )
 
-replace github.com/dxkite/qjs => ../qjs
+// replace github.com/dxkite/qjs => ../qjs
 
 require (
 	github.com/tetratelabs/wazero v1.9.0 // indirect

@@ -1,7 +1,7 @@
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/dxkite/qjs v0.0.0-20260621013206-c1dcd337bac8 h1:yAFRj9FBA4MFyQ9DMBNFPbjjrcRfKzoGrz0bSys5hNo=
-github.com/dxkite/qjs v0.0.0-20260621013206-c1dcd337bac8/go.mod h1:cSIEbWylbuS8gGGFGW3ziGFnYJS6hfjo+ovDs4uY+fU=
+github.com/dxkite/qjs v0.0.0-20260622114755-c90f6e2b5afd h1:FSU/qmDVq/xktTdukrG1iaewE35xQCvDUfZXjqUWKto=
+github.com/dxkite/qjs v0.0.0-20260622114755-c90f6e2b5afd/go.mod h1:cSIEbWylbuS8gGGFGW3ziGFnYJS6hfjo+ovDs4uY+fU=
 github.com/evanw/esbuild v0.25.0 h1:jRR9D1pfdb669VzdN4w0jwsDfrKE098nKMaDMKvMPyU=
 github.com/evanw/esbuild v0.25.0/go.mod h1:D2vIQZqV/vIf/VRHtViaUtViZmG7o+kKmlBfVQuRi48=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
