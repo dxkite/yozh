@@ -1,3 +1,5 @@
 .git
 *.pack
 *.bc
+examples
+integration
