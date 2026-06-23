@@ -74,7 +74,9 @@
     }
     get(name) {
       var k = this._key(name);
-      if (k === 'set-cookie') return this._cookies.length ? this._cookies.join(', ') : null;
+      // Set-Cookie must NOT be comma-joined (RFC 6265 §3). Return the first value only.
+      // Use getSetCookie() to retrieve all Set-Cookie headers as an array.
+      if (k === 'set-cookie') return this._cookies.length ? this._cookies[0] : null;
       var v = this._h[k]; return v !== undefined ? v : null;
     }
     has(name) {

@@ -3,25 +3,27 @@ package astroruntime
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
-	"sync/atomic"
 
 	"github.com/dxkite/qjs"
 )
 
+
 // poolConfig holds resolved configuration for NewPool.
 type poolConfig struct {
-	env                 map[string]string
-	size                int
-	memoryLimit         int
-	maxStackSize        int
-	maxExecutionTime    int
-	gcThreshold         int
-	bytecodeCacheDir    string
-	precompiledBCPath   string
+	env               map[string]string
+	size              int
+	memoryLimit       int
+	maxStackSize      int
+	maxExecutionTime  int
+	gcThreshold       int
+	bundleCacheDir    string
+	precompiledBundle []byte
+	contextProvider   func(*http.Request) *NetlifyContext
 }
 
 // PoolOption configures a QJS runtime pool.
@@ -58,43 +60,50 @@ func WithGCThreshold(bytes int) PoolOption {
 	return func(c *poolConfig) { c.gcThreshold = bytes }
 }
 
-// WithPrecompiledBytecodes loads a pre-compiled .jsbc bytecode set from path,
-// skipping JS parsing and esbuild entirely. Produced by the bundle-ssr-bin command.
-// Takes precedence over WithBytecodeCache.
-func WithPrecompiledBytecodes(path string) PoolOption {
-	return func(c *poolConfig) { c.precompiledBCPath = path }
+// WithPrecompiledBundle sets pre-compiled raw QuickJS bytecode for bundle.mjs.
+// Polyfills and glue are still compiled fresh on each pool init (fast, < 5 ms).
+// Use when the bundle.bc is already available (e.g. loaded from a .pack file).
+func WithPrecompiledBundle(bc []byte) PoolOption {
+	return func(c *poolConfig) { c.precompiledBundle = bc }
 }
 
-// WithBytecodeCache enables bytecode disk caching in dir.
-// The cache key is SHA256 of bundle + all embedded polyfill sources, so any
-// change to the bundle or a Go rebuild (polyfill update) produces a cache miss.
-// Pass an empty string to disable caching (default).
-func WithBytecodeCache(dir string) PoolOption {
-	return func(c *poolConfig) { c.bytecodeCacheDir = dir }
+// WithBundleCache enables raw bundle bytecode disk caching in dir.
+// Cache key = SHA256(bundle source + vcs.revision); a Go rebuild or bundle change
+// produces a cache miss. Pass an empty string to disable (default).
+func WithBundleCache(dir string) PoolOption {
+	return func(c *poolConfig) { c.bundleCacheDir = dir }
+}
+
+// WithContextProvider registers a per-request NetlifyContext builder.
+// fn is called once per request with the incoming *http.Request and must return
+// the NetlifyContext to pass to the JS SSR handler. When set, it replaces the
+// default extraction of IP (X-Forwarded-For / X-Real-Ip / RemoteAddr) and
+// RequestID (X-Request-Id).
+func WithContextProvider(fn func(*http.Request) *NetlifyContext) PoolOption {
+	return func(c *poolConfig) { c.contextProvider = fn }
 }
 
 // pooledRuntime wraps a QJS runtime with a per-request streaming channel.
-// streamCh is allocated fresh by HandleSSR before each request.
+// streamCh is allocated fresh by HandleRequest before each request.
 // The pool guarantees exclusive access per request.
 type pooledRuntime struct {
-	rt             *qjs.Runtime
-	streamCh       chan ResponseSignal
-	responseDoneNs atomic.Int64 // Unix ns set by handler on sigDone; read by worker after eval
+	rt       *qjs.Runtime
+	streamCh chan ResponseSignal
 }
 
 // Pool manages a set of pre-warmed QJS runtimes and a fixed-size eval worker pool.
 type Pool struct {
-	pool                chan *pooledRuntime
-	workers             chan func()
-	bundleCode          []byte
-	bcs                 *bytecodeSet
-	bcsOnce             sync.Once
-	bcsErr              error
-	env                 map[string]string
-	qjsOpt              qjs.Option
-	bytecodeCacheDir    string
-	precompiledBCPath   string
-	rtMu                sync.Mutex // serializes lazy runtime creation
+	pool              chan *pooledRuntime
+	workers           chan func()
+	bundleCode        []byte
+	bcs               *bytecodeSet
+	bcsOnce           sync.Once
+	bcsErr            error
+	env               map[string]string
+	qjsOpt            qjs.Option
+	bundleCacheDir    string
+	precompiledBundle []byte
+	contextProvider   func(*http.Request) *NetlifyContext
 }
 
 // NewPool creates a pool of QJS runtimes, each initialized with:
@@ -135,8 +144,9 @@ func NewPool(bundleCode []byte, opts ...PoolOption) (*Pool, error) {
 		workers:           make(chan func(), size*2),
 		bundleCode:        bundleCode,
 		env:               env,
-		bytecodeCacheDir:  cfg.bytecodeCacheDir,
-		precompiledBCPath: cfg.precompiledBCPath,
+		bundleCacheDir:    cfg.bundleCacheDir,
+		precompiledBundle: cfg.precompiledBundle,
+		contextProvider:   cfg.contextProvider,
 		qjsOpt: qjs.Option{
 			MemoryLimit:      cfg.memoryLimit,
 			MaxStackSize:     cfg.maxStackSize,
@@ -153,12 +163,20 @@ func NewPool(bundleCode []byte, opts ...PoolOption) (*Pool, error) {
 		}()
 	}
 
-	// Eagerly warm one slot: triggers bytecode compilation and surfaces errors at startup.
-	prt, err := p.newRuntime()
-	if err != nil {
-		return nil, fmt.Errorf("pool warm-up: %w", err)
+	// Pre-warm all slots: triggers bytecode compilation (once, shared) and surfaces errors at startup.
+	// All runtimes are created upfront so Get() can block safely rather than spawn extras.
+	for i := 0; i < size; i++ {
+		prt, err := p.newRuntime()
+		if err != nil {
+			// Drain and close any already-created runtimes.
+			close(p.pool)
+			for prt := range p.pool {
+				prt.rt.Close()
+			}
+			return nil, fmt.Errorf("pool warm-up (slot %d/%d): %w", i+1, size, err)
+		}
+		p.pool <- prt
 	}
-	p.pool <- prt
 
 	return p, nil
 }
@@ -173,29 +191,25 @@ func (p *Pool) newRuntime() (*pooledRuntime, error) {
 	}
 
 	p.bcsOnce.Do(func() {
-		if p.precompiledBCPath != "" {
-			p.bcs, p.bcsErr = loadCachedBytecodes(p.precompiledBCPath)
-			if p.bcsErr == nil {
-				log.Printf("precompiled bytecodes loaded: %s", p.precompiledBCPath)
-			}
-			return
-		}
-		if p.bytecodeCacheDir != "" {
-			key := cacheKey(p.bundleCode)
-			cachePath := filepath.Join(p.bytecodeCacheDir, key+".jsbc")
-			if bcs, err := loadCachedBytecodes(cachePath); err == nil {
-				log.Printf("bytecode cache hit: %s", cachePath)
-				p.bcs = bcs
-				return
+		bundleBC := p.precompiledBundle
+
+		if bundleBC == nil && p.bundleCacheDir != "" {
+			key := bundleCacheKey(p.bundleCode)
+			cachePath := filepath.Join(p.bundleCacheDir, key+".bc")
+			if bc, err := os.ReadFile(cachePath); err == nil {
+				log.Printf("bundle cache hit: %s", cachePath)
+				bundleBC = bc
 			}
 		}
-		p.bcs, p.bcsErr = compileBytecodes(rt.Context(), p.bundleCode)
-		if p.bcsErr == nil && p.bytecodeCacheDir != "" {
-			key := cacheKey(p.bundleCode)
-			cachePath := filepath.Join(p.bytecodeCacheDir, key+".jsbc")
-			if mkErr := os.MkdirAll(p.bytecodeCacheDir, 0755); mkErr == nil {
-				if saveErr := saveCachedBytecodes(cachePath, p.bcs); saveErr == nil {
-					log.Printf("bytecode cache saved: %s", cachePath)
+
+		p.bcs, p.bcsErr = compileBytecodes(rt.Context(), p.bundleCode, bundleBC)
+
+		if p.bcsErr == nil && p.bundleCacheDir != "" && p.precompiledBundle == nil && bundleBC == nil {
+			key := bundleCacheKey(p.bundleCode)
+			cachePath := filepath.Join(p.bundleCacheDir, key+".bc")
+			if mkErr := os.MkdirAll(p.bundleCacheDir, 0755); mkErr == nil {
+				if saveErr := os.WriteFile(cachePath, p.bcs.bundle, 0644); saveErr == nil {
+					log.Printf("bundle cache saved: %s", cachePath)
 				}
 			}
 		}
@@ -214,21 +228,10 @@ func (p *Pool) newRuntime() (*pooledRuntime, error) {
 }
 
 // Get checks out a runtime. Caller MUST call Put() when done.
-// Creates a new runtime lazily if the pool is empty.
+// Blocks until a runtime is available (bounded pool — never exceeds size).
 func (p *Pool) Get() (*pooledRuntime, error) {
-	select {
-	case prt := <-p.pool:
-		return prt, nil
-	default:
-	}
-	p.rtMu.Lock()
-	defer p.rtMu.Unlock()
-	select {
-	case prt := <-p.pool:
-		return prt, nil
-	default:
-		return p.newRuntime()
-	}
+	prt := <-p.pool
+	return prt, nil
 }
 
 // Put returns a runtime to the pool. Closes the runtime if the pool channel is full.
@@ -247,6 +250,20 @@ func (p *Pool) submit(fn func()) {
 	default:
 		go fn()
 	}
+}
+
+// PoolStats is a point-in-time snapshot of pool utilization.
+type PoolStats struct {
+	Size int // total runtimes in the pool
+	Idle int // currently idle (available)
+	Busy int // currently in use
+}
+
+// Stats returns a snapshot of the pool's current utilization.
+func (p *Pool) Stats() PoolStats {
+	idle := len(p.pool)
+	size := cap(p.pool)
+	return PoolStats{Size: size, Idle: idle, Busy: size - idle}
 }
 
 // Close stops all worker goroutines.

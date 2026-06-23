@@ -1,100 +1,45 @@
 package astroruntime
 
 import (
-	"bytes"
 	"crypto/sha256"
-	"encoding/gob"
 	"encoding/hex"
 	"fmt"
-	"os"
+	"runtime/debug"
 
 	"github.com/dxkite/qjs"
 )
 
-// CompileBytecodeSet bundles bundleSrc as a QJS bytecode set (polyfills + bundle + glue)
-// and writes the serialized result to outPath.
-// The output can be loaded by NewPool with WithPrecompiledBytecodes to skip JS parsing on startup.
-func CompileBytecodeSet(bundleSrc []byte, outPath string) error {
+// CompileBundleBytecode compiles bundleSrc to raw QuickJS module bytecode.
+// The output is the direct JS_WriteObject result — the same format written to bundle.bc.
+// Polyfills and glue are NOT included; they are compiled fresh at runtime by the pool.
+func CompileBundleBytecode(bundleSrc []byte) ([]byte, error) {
 	rt, err := qjs.New(qjs.Option{})
 	if err != nil {
-		return fmt.Errorf("qjs runtime: %w", err)
+		return nil, fmt.Errorf("qjs runtime: %w", err)
 	}
 	defer rt.Close()
-	bcs, err := compileBytecodes(rt.Context(), bundleSrc)
+	bc, err := rt.Context().Compile("ssr.mjs", qjs.Code(string(bundleSrc)), qjs.TypeModule())
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("compile bundle: %w", err)
 	}
-	return saveCachedBytecodes(outPath, bcs)
+	return bc, nil
 }
 
-const bcFormatVersion uint32 = 1
-
-// serializedPolyfill is the gob-encodable form of polyfillEntry.
-type serializedPolyfill struct {
-	Name string
-	BC   []byte
-}
-
-// serializedBytecodeSet is the on-disk representation of bytecodeSet.
-type serializedBytecodeSet struct {
-	Version   uint32
-	Polyfills []serializedPolyfill
-	Bundle    []byte
-	Glue      []byte
-}
-
-// cacheKey returns the SHA256 hex of all bytecode compilation inputs.
-// Any change to the bundle, polyfills, or glue produces a new key,
-// guaranteeing stale bytecodes are never loaded from cache.
-func cacheKey(bundleCode []byte) string {
+// bundleCacheKey returns the hex-encoded SHA256 of bundleCode mixed with the
+// current binary's VCS revision. When the Go binary is rebuilt (e.g. after a
+// QJS WASM upgrade), the revision changes and the cached bytecode is invalidated.
+func bundleCacheKey(bundleCode []byte) string {
 	h := sha256.New()
 	h.Write(bundleCode)
-	for _, src := range []string{
-		webAPIPolyfill, cryptoPolyfill, filePolyfill,
-		envAPIStub, intlStub, structuredCloneGuard, consoleDef, fetchDef,
-		glueJS,
-	} {
-		h.Write([]byte(src))
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" {
+				h.Write([]byte(s.Value))
+				break
+			}
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil))
-}
-
-// saveCachedBytecodes encodes bcs to disk at path using gob encoding.
-func saveCachedBytecodes(path string, bcs *bytecodeSet) error {
-	sbs := serializedBytecodeSet{
-		Version: bcFormatVersion,
-		Bundle:  bcs.bundle,
-		Glue:    bcs.glue,
-	}
-	for _, p := range bcs.polyfills {
-		sbs.Polyfills = append(sbs.Polyfills, serializedPolyfill{Name: p.name, BC: p.bc})
-	}
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(sbs); err != nil {
-		return err
-	}
-	return os.WriteFile(path, buf.Bytes(), 0644)
-}
-
-// loadCachedBytecodes reads and decodes a bytecodeSet from path.
-// Returns an error if the file is missing, corrupt, or has a version mismatch.
-func loadCachedBytecodes(path string) (*bytecodeSet, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var sbs serializedBytecodeSet
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&sbs); err != nil {
-		return nil, err
-	}
-	if sbs.Version != bcFormatVersion {
-		return nil, fmt.Errorf("bytecode cache version mismatch: got %d, want %d", sbs.Version, bcFormatVersion)
-	}
-	bcs := &bytecodeSet{bundle: sbs.Bundle, glue: sbs.Glue}
-	for _, p := range sbs.Polyfills {
-		bcs.polyfills = append(bcs.polyfills, polyfillEntry{name: p.Name, bc: p.BC})
-	}
-	return bcs, nil
 }
 
 type polyfillEntry struct {
@@ -111,17 +56,12 @@ type bytecodeSet struct {
 }
 
 // compileBytecodes compiles polyfills, the ESM bundle, and the glue adapter to
-// QuickJS bytecode using the provided context. The returned bytecodes are
-// independent copies of WASM memory and safe to use in any other context.
-//
-// Callers pass the first pool worker's context so no extra WASM runtime is
-// created: the compile cost is borne by the same runtime instance that will
-// also run the bytecodes, eliminating the overhead of a separate compile runtime.
-func compileBytecodes(ctx *qjs.Context, bundleSrc []byte) (*bytecodeSet, error) {
+// QuickJS bytecode. If precompiledBundle is non-nil it is used as-is, skipping
+// the (expensive) bundle compilation step.
+func compileBytecodes(ctx *qjs.Context, bundleSrc []byte, precompiledBundle []byte) (*bytecodeSet, error) {
 	bcs := &bytecodeSet{}
 	var err error
 
-	// Compile polyfills (global scripts, order must match setupRuntime eval order).
 	srcs := []struct{ name, src string }{
 		{"web-api-polyfill.js", webAPIPolyfill},
 		{"crypto-polyfill.js", cryptoPolyfill},
@@ -141,13 +81,15 @@ func compileBytecodes(ctx *qjs.Context, bundleSrc []byte) (*bytecodeSet, error) 
 		bcs.polyfills = append(bcs.polyfills, polyfillEntry{p.name, bc})
 	}
 
-	// Compile the ESM bundle (module mode, self-contained — no external imports).
-	bcs.bundle, err = ctx.Compile("ssr.mjs", qjs.Code(string(bundleSrc)), qjs.TypeModule())
-	if err != nil {
-		return nil, fmt.Errorf("compile bundle: %w", err)
+	if precompiledBundle != nil {
+		bcs.bundle = precompiledBundle
+	} else {
+		bcs.bundle, err = ctx.Compile("ssr.mjs", qjs.Code(string(bundleSrc)), qjs.TypeModule())
+		if err != nil {
+			return nil, fmt.Errorf("compile bundle: %w", err)
+		}
 	}
 
-	// Compile the glue adapter (global script).
 	bcs.glue, err = ctx.Compile("glue.js", qjs.Code(glueJS))
 	if err != nil {
 		return nil, fmt.Errorf("compile glue: %w", err)

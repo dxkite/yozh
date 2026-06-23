@@ -7,9 +7,9 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,7 +22,7 @@ var errUnsupportedFormat = errors.New("unsupported image format")
 
 // HandleImageCDN implements the /.netlify/images image transformation endpoint.
 // Parameters: url (source path or absolute URL), fm (format), w, h (dimensions), q (quality 1-100), fit (cover/contain/fill).
-func HandleImageCDN(distDir string, w http.ResponseWriter, r *http.Request) {
+func HandleImageCDN(distFS fs.FS, w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	rawURL := q.Get("url")
 	format := strings.ToLower(q.Get("fm"))
@@ -39,22 +39,41 @@ func HandleImageCDN(distDir string, w http.ResponseWriter, r *http.Request) {
 		quality = 75
 	}
 
-	// Locate source: relative paths resolve into distDir, absolute URLs are fetched.
-	srcPath, rc, err := openSource(distDir, rawURL)
+	// Locate source: relative paths resolve inside distFS, absolute URLs are fetched.
+	name, rc, err := openSource(distFS, rawURL)
 	if err != nil {
 		http.Error(w, "image not found", http.StatusNotFound)
 		return
 	}
 	defer rc.Close()
 
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(srcPath), "."))
+	// For relative paths, name carries the extension. For absolute URLs, name is
+	// empty — fall back to the extension from rawURL's path segment.
+	extSrc := name
+	if extSrc == "" {
+		extSrc = rawURL
+	}
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(strings.SplitN(extSrc, "?", 2)[0]), "."))
 	img, err := decodeImage(rc, ext)
 	if err != nil {
 		// Unsupported decode (e.g. AVIF) → serve original file as-is.
 		rc.Close()
-		if srcPath != "" {
+		if name != "" {
 			log.Printf("[image-cdn] cannot decode %s (%v), serving original", ext, err)
-			http.ServeFile(w, r, srcPath)
+			// Re-open and serve raw bytes (rc was unread for unknown formats).
+			if f, err2 := distFS.Open(name); err2 == nil {
+				defer f.Close()
+				fi, _ := f.Stat()
+				if rs, ok := f.(io.ReadSeeker); ok {
+					http.ServeContent(w, r, fi.Name(), fi.ModTime(), rs)
+				} else {
+					data, _ := io.ReadAll(f)
+					http.ServeContent(w, r, fi.Name(), fi.ModTime(),
+						strings.NewReader(string(data)))
+				}
+			} else {
+				http.Error(w, "unsupported image format", http.StatusUnsupportedMediaType)
+			}
 		} else {
 			http.Error(w, "unsupported image format", http.StatusUnsupportedMediaType)
 		}
@@ -68,10 +87,10 @@ func HandleImageCDN(distDir string, w http.ResponseWriter, r *http.Request) {
 	encodeResponse(w, img, format, quality)
 }
 
-// openSource opens the image source. For relative URLs it opens a file inside distDir;
-// for absolute URLs it fetches via HTTP. Returns the resolved filesystem path (empty for HTTP),
+// openSource opens the image source. For relative URLs it opens a file inside distFS;
+// for absolute URLs it fetches via HTTP. Returns the path within distFS (empty for HTTP),
 // a ReadCloser, and any error.
-func openSource(distDir, rawURL string) (fsPath string, rc io.ReadCloser, err error) {
+func openSource(distFS fs.FS, rawURL string) (name string, rc io.ReadCloser, err error) {
 	if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
 		resp, ferr := fetchClient.Get(rawURL)
 		if ferr != nil {
@@ -84,15 +103,14 @@ func openSource(distDir, rawURL string) (fsPath string, rc io.ReadCloser, err er
 		return "", resp.Body, nil
 	}
 
-	// Relative path: strip any accidental leading slash (image-service.js already does this,
-	// but be defensive) then join with distDir.
+	// Relative path: strip leading slash; fs.FS paths must not start with '/'.
 	clean := strings.TrimPrefix(rawURL, "/")
-	fsPath = filepath.Join(distDir, filepath.FromSlash(clean))
-	f, ferr := os.Open(fsPath)
+	clean = filepath.ToSlash(clean) // normalize separators
+	f, ferr := distFS.Open(clean)
 	if ferr != nil {
 		return "", nil, ferr
 	}
-	return fsPath, f, nil
+	return clean, f, nil
 }
 
 // decodeImage decodes an image from r using the file extension as a hint.

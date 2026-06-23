@@ -3,27 +3,156 @@
 ## cmd/main.go — CLI 入口
 
 ### 职责
-解析命令行参数，按顺序调用 bundle → pool → server。
 
-### 流程
+解析命令行参数，通过 Runtime SDK 串联 build 和 serve 流程。
+
+### build 命令流程
+
 ```
-1. flag.Parse()：--port, --ssr, --dist
-2. filepath.Abs()：解析为绝对路径
-3. os.Stat(absSSR)：验证 SSR entry 存在
-4. BundleSSR(absSSR) → bundleCode []byte
-5. NewPool(bundleCode, envMap(), poolSize) → *Pool
-6. StartServer(pool, absDist, addr)
+1. BundleSSR(absEntry) → jsCode []byte
+2. --plain:    writeOut(outPath, jsCode)
+   --bytecode: CompileBundleBytecode(jsCode) → bc; writeOut(outPath, bc)
+   --pack:     BuildPack(outPath, jsCode, absDist)
+               （内部：CompileBundleBytecode → writePack，输出 bundle.mjs+bundle.bc+dist/）
 ```
 
-Pool 大小 = `runtime.NumCPU()`，限制在 `[2, 8]`。
+### serve 命令流程
+
+```
+--pack:   NewRuntime(WithPackFile, WithCacheDir, WithPoolOptions(WithEnv))
+          → rt.ListenAndServe(addr)
+
+--bundle: jsCode = os.ReadFile(bundle)
+          NewRuntime(WithBundle, WithDistDir, WithCacheDir, WithPoolOptions(WithEnv))
+          → rt.ListenAndServe(addr)
+
+--entry:  jsCode = BundleSSR(entry)
+          NewRuntime(WithBundle, WithDistDir, WithCacheDir, WithPoolOptions(WithEnv))
+          → rt.ListenAndServe(addr)
+```
+
+自动检测顺序（未指定任何模式时）：
+1. `.netlify/build/bundle.pack` 存在 → pack 模式
+2. `.netlify/build/bundle.mjs` 存在 → bundle 模式
+3. 默认 → entry 模式（`.netlify/build/entry.mjs`）
 
 `envMap()` 将 `os.Environ()` 转换为 `map[string]string`，注入到 QJS 的 `process.env`。
+
+---
+
+## pack.go — Pack 加载与构建
+
+### 构建（对外导出）
+
+```go
+func BuildPack(outPath string, jsCode []byte, distDir string) error
+```
+
+编译字节码并打包为 .pack zip（bundle.mjs + bundle.bc + dist/）。
+
+```go
+func CompileBundleBytecode(bundleSrc []byte) ([]byte, error)  // bytecode.go，对外导出
+func BundleSSR(entryPath string) ([]byte, error)              // bundle.go，对外导出
+```
+
+### 加载（内部）
+
+| 函数 | 说明 |
+|---|---|
+| `openPackInMemory(data)` | zip → bundleBC + 内存 distFS（zip.Reader 直接作为 fs.FS） |
+| `openPackFile(path, cacheDir)` | 读磁盘 → openPackInMemory 或 extractPackToCache |
+| `extractPackToCache(data, cacheDir)` | SHA256 key → cacheDir/<hash>/ 持久解压，cache hit 跳过 |
+| `extractZip(r, destDir)` | 带路径遍历防护的 zip 解压 |
+| `readZipEntry(r, name)` | 读取单个 zip entry |
+| `loadPackData(r)` | io.Reader → []byte |
+
+### Pack 格式
+
+```
+bundle.pack (zip)
+├── bundle.mjs   — esbuild 打包的自包含 ESM（CJS format，QJS 可直接 eval）
+├── bundle.bc    — QuickJS 字节码（从 bundle.mjs 编译，启动时跳过 ~1.5s 编译耗时）
+└── dist/        — Astro 静态输出（_astro/*.{js,css,png,...}、index.html 等）
+```
+
+---
+
+## server.go — Runtime SDK + HTTP 路由
+
+### Runtime 类型
+
+```go
+type Runtime struct {
+    pool   *Pool
+    distFS fs.FS
+}
+```
+
+### NewRuntime
+
+```go
+func NewRuntime(opts ...RuntimeOption) (*Runtime, error)
+```
+
+必须指定一个 source option（`WithPack`/`WithPackReader`/`WithPackFile`/`WithBundle`），
+其余 option 均为可选。
+
+内部分派逻辑：
+
+```
+WithPackReader  → loadPackData → 同 WithPack
+WithPack        → openPackInMemory 或 extractPackToCache（有 cacheDir 时）
+WithPackFile    → openPackFile
+WithBundle      → 直接传 jsCode 给 NewPool（可选 WithBundleCache）
+```
+
+### RuntimeOption
+
+| 函数 | 说明 |
+|---|---|
+| `WithPack(data []byte)` | 内存 pack bytes |
+| `WithPackReader(r io.Reader)` | 从 io.Reader 读取 pack（消费一次） |
+| `WithPackFile(path string)` | .pack 文件路径 |
+| `WithBundle(code []byte)` | 原始 JS bundle |
+| `WithDistFS(fsys fs.FS)` | 静态资产 FS |
+| `WithDistDir(path string)` | 静态资产目录（os.DirFS 包装） |
+| `WithCacheDir(dir string)` | 持久缓存目录 |
+| `WithPoolOptions(opts ...PoolOption)` | 传递 PoolOption（WithEnv/WithSize/…） |
+
+### Runtime 方法
+
+```go
+func (rt *Runtime) ServeHTTP(w http.ResponseWriter, r *http.Request)
+func (rt *Runtime) ListenAndServe(addr string) error
+func (rt *Runtime) Pool() *Pool
+func (rt *Runtime) DistFS() fs.FS
+func (rt *Runtime) Close()
+```
+
+### ServeHTTP 路由逻辑
+
+```
+请求
+├─ path == "/.netlify/images" → HandleImageCDN(distFS, w, r)
+├─ distFS 中有对应文件       → serveStaticFS（/_astro/* 加 immutable 缓存头）
+├─ distFS 中有 path/index.html → serveStaticFS
+└─ 否 → pool.RequestContext → HandleRequest（SSR 池）
+```
+
+### StartServer（向后兼容）
+
+```go
+func StartServer(pool *Pool, distFS fs.FS, addr string) error
+```
+
+等同于 `(&Runtime{pool: pool, distFS: distFS}).ListenAndServe(addr)`，保留以兼容旧代码。
 
 ---
 
 ## bundle.go — esbuild 打包
 
 ### 函数签名
+
 ```go
 func BundleSSR(entryPath string) ([]byte, error)
 ```
@@ -38,344 +167,178 @@ func BundleSSR(entryPath string) ([]byte, error)
 | `Write` | `false` | 输出到内存，不写磁盘 |
 | `MainFields` | `["module", "main"]` | 优先使用 ESM 源码 |
 
-### External 清单
-
 所有 `node:*` 和裸 Node 内置（`fs`、`path`、`crypto` 等）标记为 external，
-由 runtime.go 中的 `require` shim 处理。Netlify SDK（`@netlify/blobs` 等）和构建工具
-（`vite`、`esbuild`）也标记为 external，SSR 运行时不需要它们。
-
-### Define
-
-```javascript
-"process.env.NODE_ENV": '"production"'
-```
-
-在打包阶段消除开发模式代码路径，减小 bundle 体积。
+由 runtime.go 中的 `require` shim 处理。
 
 ---
 
-## runtime.go — QJS Pool 管理
+## pool.go — QJS Pool 管理
 
 ### 类型
 
 ```go
-type Pool struct {
-    inner *qjs.Pool
-}
+type Pool struct { ... }
+type PoolOption func(*poolConfig)
 ```
 
 ### 函数
 
 ```go
-func NewPool(bundleCode []byte, env map[string]string, size int) (*Pool, error)
-func (p *Pool) Get() (*qjs.Runtime, error)
-func (p *Pool) Put(rt *qjs.Runtime)
+func NewPool(bundleCode []byte, opts ...PoolOption) (*Pool, error)
+func (p *Pool) Get() (*pooledRuntime, error)   // 阻塞直到有空闲 runtime
+func (p *Pool) Put(prt *pooledRuntime)
 func (p *Pool) Close()
+func (p *Pool) RequestContext(w, r) (*RequestContext, error)
 ```
 
-`NewPool` 校验 size 在 `[1, 1000]` 范围内，创建 Pool 后立即 Get/Put 一个 runtime 做 eager warm-up，
-在启动时暴露初始化错误。
+### PoolOption
 
-`Close()` 是空操作——`qjs.Pool` 无 Close 方法，池中 runtime 在程序退出时被 GC。
-
-### setupRuntime(rt, bundleCode, env)
-
-每个 QJS Runtime 的初始化函数，顺序不可调换：
-
-1. **injectHostFunctions** — 注册 Go host functions
-2. **polyfills** — 8 个 JS 文件依次 `ctx.Eval`
-3. **CJS bundle wrapper** — 用 `fmt.Sprintf` 拼接 `require` shim + bundle code
-4. **glue.js** — 定义 `__handleRequest`
-
-### CJS Wrapper 结构
-
-```javascript
-var __ssrHandler = (function(module, exports) {
-  var require = function(id) {
-    if (id === 'process' || id === 'node:process')
-      return { env: __processEnv };
-    if (id === 'node:crypto' || id === 'crypto')
-      return { webcrypto: globalThis.crypto };
-    if (id === 'node:buffer' || id === 'buffer')
-      return { File: globalThis.File };
-    if (id === 'node:path' || id === 'path')
-      return { join, resolve, dirname, basename };
-    // 主动 throw：激活 bundle 内置的 web-streams-polyfill fallback
-    if (id === 'node:stream/web' || id === 'stream/web')
-      throw new Error(id + ' not available in QJS');
-    return {};
-  };
-  // ── bundle code ──
-  ...
-  // Netlify adapter 二级工厂：createHandler({}) → async handler(req, ctx)
-  var __rawExport = module.exports.default || module.exports;
-  return typeof __rawExport === 'function' ? __rawExport({}) : __rawExport;
-}({ exports: {} }, {}));
-```
-
-### process 对象的特殊设置
-
-```javascript
-globalThis.process = { env: __processEnv, version: 'v20.0.0', ... };
-// 使 Object.prototype.toString.call(process) === '[object process]'
-// → Astro 的 isNode = true → 使用 renderToAsyncIterable（不依赖 ReadableStream/setTimeout）
-Object.defineProperty(globalThis.process, Symbol.toStringTag, { value: 'process' });
-```
-
-### injectHostFunctions 注册的函数
-
-| Host Function | 类型 | 参数 | 返回 | 实现 |
-|---|---|---|---|---|
-| `__go_cryptoRandomBytes(n)` | 同步 | 字节数 | ArrayBuffer | `crypto/rand.Read` |
-| `__go_consoleWrite(level, msg)` | 同步 | 日志级别、消息 | `""` | `fmt.Fprintf(os.Stderr)` |
-| `__go_fetchRaw(url, method, headersJSON, body)` | 异步 | 请求参数 | JSON 响应字符串 | `fetchClient.Do`（30s 超时） |
-| `__go_textEncodeUTF8(str)` | 同步 | 字符串 | ArrayBuffer | Go `[]byte(str)` |
-| `__go_textDecodeUTF8(b64)` | 同步 | base64 字符串 | 字符串 | `base64.Decode` + `string(b)` |
-| `__go_bufToB64(jsonNumArray)` | 同步 | JSON 字节数组 | base64 字符串 | `base64.StdEncoding.EncodeToString` |
-| `__go_b64ToBuf(b64)` | 同步 | base64 字符串 | ArrayBuffer | `base64.StdEncoding.DecodeString` |
-| `__go_urlParse(input, base)` | 同步 | URL 字符串、base 字符串 | JSON 字符串 | `net/url.Parse` + `ResolveReference` |
-| `__go_cryptoSubtleDigest(algo, dataB64)` | 同步 | 算法名、数据 base64 | 摘要 base64 | `crypto/sha256`、`sha512`、`sha1` |
-| `__go_cryptoSubtleImportKey(...)` | 同步 | format、数据、算法 JSON | keyId 或 `ERROR:msg` | 解析并存入 keyRegistry |
-| `__go_cryptoSubtleGenerateKey(...)` | 同步 | 算法 JSON | keyId | `crypto/rand` 生成 |
-| `__go_cryptoSubtleExportKey(format, keyId)` | 同步 | - | base64 或 JWK JSON | 从 keyRegistry 取出序列化 |
-| `__go_cryptoSubtleSign(algoJSON, keyId, dataB64)` | 同步 | - | 签名 base64 | `crypto/hmac` |
-| `__go_cryptoSubtleVerify(algoJSON, keyId, sigB64, dataB64)` | 同步 | - | `"true"`/`"false"` | `hmac.Equal` |
-| `__go_cryptoSubtleEncrypt(algoJSON, keyId, plainB64)` | 同步 | - | 密文 base64 | AES-GCM / AES-CBC |
-| `__go_cryptoSubtleDecrypt(algoJSON, keyId, cipherB64)` | 同步 | - | 明文 base64 | AES-GCM / AES-CBC |
-| `__go_cryptoSubtleDeriveBits(algoJSON, keyId, length)` | 同步 | - | `ERROR:...`（P1 stub） | 未实现，返回错误 |
-
-`__go_fetchRaw` 使用 `ctx.SetGoAsyncFunc`：goroutine 执行 HTTP 请求后将 resolve/reject 写入
-`Context.pendingCallbacks chan func()`，QJS goroutine 的 `Await()` 轮询循环在 WASM 安全的上下文中消费
-该 channel 并 resolve Promise，实现真正的并发 fetch（`Promise.allSettled` 3×80ms ≈ 83ms）。
-其余函数均为同步（`ctx.SetGoFunc`）。
-
----
-
-## crypto_subtle.go — Web Crypto API Go 实现
-
-### 职责
-
-实现 `crypto.subtle.*` 所有操作的 Go 端逻辑，注册为 `__go_cryptoSubtle*` host functions，
-供 `js/crypto.js` 中的薄 JS 封装层调用。
-
-### Key Registry
-
-每个 `Pool` 实例拥有独立的 key registry（`map[string]*cryptoKey`），
-密钥 ID 为随机生成的 16 字节十六进制字符串（`kXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`）。
-
-```go
-type cryptoKey struct {
-    ID          string
-    Type        string    // "secret" | "public" | "private"
-    Algo        algoSpec
-    Raw         []byte
-    Extractable bool
-    Usages      []string
-}
-```
-
-密钥不跨 Pool 共享，不持久化，进程退出后失效。
-
-### 支持的算法
-
-| 操作 | 算法 | 备注 |
+| 函数 | 默认 | 说明 |
 |---|---|---|
-| digest | SHA-1, SHA-256, SHA-384, SHA-512 | |
-| generateKey / importKey | HMAC + SHA-256/384/512 | raw / JWK 格式 |
-| generateKey / importKey | AES-GCM 128/256 | raw 格式 |
-| generateKey / importKey | AES-CBC 128/256 | raw 格式 |
-| sign / verify | HMAC | |
-| encrypt / decrypt | AES-GCM（12 字节 nonce，16 字节 tag） | |
-| encrypt / decrypt | AES-CBC（PKCS7 padding，16 字节 IV） | |
-| exportKey | HMAC → raw / JWK；AES → raw | |
+| `WithEnv(env map[string]string)` | `os.Environ()` | 注入 process.env |
+| `WithSize(n int)` | clamp(NumCPU, 2, 8) | Pool 大小，范围 [1, 1000]；0 = 自动 |
+| `WithMemoryLimit(bytes int)` | 128MB | 每个 QJS 实例内存上限 |
+| `WithMaxStackSize(bytes int)` | — | JS 调用栈大小 |
+| `WithMaxExecutionTime(ms int)` | — | 单次请求执行超时（毫秒） |
+| `WithGCThreshold(bytes int)` | — | GC 触发阈值 |
+| `WithPrecompiledBundle(bc []byte)` | — | 传入预编译字节码，跳过编译步骤 |
+| `WithBundleCache(dir string)` | — | 字节码磁盘缓存目录 |
 
-### 安全实现要点
+### Pool 语义（有界阻塞）
 
-- **`newKeyID()`**：`rand.Read` 失败时返回 error，不静默忽略
-- **IV 长度验证**：AES-GCM 在 `cipher.NewGCM` 后验证 `len(iv) == gcm.NonceSize()`；
-  AES-CBC 验证 `len(iv) == aes.BlockSize`，长度不对直接返回错误，不进入 Seal/Open
-- **常量时间 PKCS7**：unpad 遍历所有 padding 字节做 XOR 累积，不提前退出，防止 padding oracle
-
----
-
-## polyfills.go — JS Polyfill 嵌入声明
-
-通过 `//go:embed` 在编译时将 `js/` 目录下的 8 个 JS 文件嵌入二进制：
-
-```go
-//go:embed js/web-api.js
-var webAPIPolyfill string
-
-//go:embed js/crypto.js
-var cryptoPolyfill string
-// ... 共 8 个
-```
-
-无运行时文件 I/O，JS 源码与 Go 二进制一起分发。
-
----
-
-## glue.js — Go↔QJS 桥接
-
-### 接口
-
-```javascript
-globalThis.__handleRequest(requestJSON: string): Promise<string>
-```
-
-**输入**（JSON）：
-```json
-{
-  "method": "GET",
-  "url": "http://localhost:8888/products/1",
-  "headers": [["accept", "text/html"], ["cookie", "user-id=abc"]],
-  "body": null,
-  "context": { "ip": "127.0.0.1", "requestId": "mock-id", "geo": {}, ... }
-}
-```
-
-**输出**（JSON）：
-```json
-{
-  "status": 200,
-  "headers": [["content-type", "text/html"], ["vary", "Accept-Encoding"]],
-  "body": "<!DOCTYPE html>..."
-}
-```
-
-### buildNetlifyContext
-
-构造完整的 Netlify `Context` 对象，包含：
-- `ip`, `requestId`
-- `geo`：`{ city, country, subdivision, timezone, longitude, latitude }`
-- `site`, `deploy`, `account`, `server`
-- 方法：`json(data)`、`log(...args)`
-- Stub（抛出错误）：`next()`、`cookies`、`params`、`rewrite()`
+`NewPool` 预热所有 `size` 个 runtime（不是懒加载）；`Get()` 阻塞直到有空闲 runtime 可用。
+这保证 size=1 的 Pool 在顺序测试中始终复用同一 runtime（in-memory session 不丢失）。
 
 ---
 
 ## handler.go — 请求处理
 
-### 函数签名
+### 类型
+
 ```go
-func HandleSSR(pool *Pool, w http.ResponseWriter, r *http.Request)
+type RequestContext struct { ... }  // 单次请求上下文，含 pool、pooledRuntime、w、r
+
+func (p *Pool) RequestContext(w http.ResponseWriter, r *http.Request) (*RequestContext, error)
+func HandleRequest(rc *RequestContext)
 ```
 
 ### 流程
 
 ```
-1. io.ReadAll(io.LimitReader(r.Body, 10MB)) → bodyPtr *string（非 GET/HEAD 且 r.Body != nil）
-   GET/HEAD: bodyPtr = nil（JSON 序列化为 null）
-   空 body POST: bodyPtr 指向 ""（JSON 序列化为 ""）
-2. fullURL(r) → 重建完整 URL（scheme://host+RequestURI）
-3. 收集 r.Header → [][2]string
-4. json.Marshal(requestPayload) → payloadBytes
-5. json.Marshal(string(payloadBytes)) → JS 字符串字面量（双重编码）
-6. pool.Get() → rt
-7. ctx.Eval("handle-request.js", "await __handleRequest("+jsLiteral+")", FlagAsync)
-8. json.Unmarshal(resultVal.String()) → responsePayload
-9. w.Header().Add 写入响应头
-10. w.WriteHeader(resp.Status)
-11. fmt.Fprint(w, resp.Body)
-12. pool.Put(rt) [defer]
+1. pool.Get() → pooledRuntime（阻塞）
+2. io.ReadAll(io.LimitReader(r.Body, 10MB)) → bodyPtr
+3. fullURL(r) → 重建 scheme://host+RequestURI
+4. json.Marshal(requestPayload) → payloadBytes（双重 JSON 编码）
+5. ctx.Eval("await __handleRequest(jsonLiteral)", FlagAsync)
+6. 流式输出：__go_sendHeaders → __go_sendChunk × N → __go_endStream
+7. pool.Put(rt) [defer]
 ```
 
-双重 JSON 编码保证 payload 中含特殊字符时 JS 代码字符串仍然合法。
+每次请求独立的 `tailCh chan responseInfo`（buffer=1）协调 worker→main timing，
+确保 trace span 在响应完成后正确记录。
+
+---
+
+## runtime.go — QJS 运行时初始化
+
+### setupRuntime 顺序
+
+每个 QJS Runtime 按以下顺序初始化（顺序不可调换）：
+
+```
+1. injectHostFunctions()
+   ├── process / __processEnv
+   ├── __go_cryptoRandomBytes
+   ├── __go_consoleWrite
+   ├── __go_fetchRaw（异步，SetGoAsyncFunc）
+   ├── __go_sendHeaders / __go_sendChunk / __go_endStream
+   ├── injectBinaryOps：__go_textEncodeUTF8/DecodeUTF8/bufToB64/b64ToBuf/__go_urlParse
+   └── injectCryptoSubtle：__go_cryptoSubtle* 系列
+
+2. webAPIPolyfill（js/web-api.js）
+3. cryptoPolyfill（js/crypto.js）
+4. filePolyfill（js/file.js）
+5. envAPIStub（js/env-api.js）：URL, URLSearchParams, atob/btoa, setTimeout stub 等
+6. intlStub（js/intl.js）
+7. structuredCloneGuard（js/structured-clone.js）
+8. consoleDef（js/console.js）
+9. fetchDef（js/fetch.js）
+10. CJS bundle（带 require shim 包装的 Astro SSR bundle）
+11. glue.js（定义 __handleRequest）
+```
+
+---
+
+## crypto_subtle.go — Web Crypto API Go 实现
+
+### 支持的算法
+
+| 操作 | 算法 |
+|---|---|
+| digest | SHA-1, SHA-256, SHA-384, SHA-512 |
+| generateKey / importKey | HMAC (SHA-256/384/512)，raw / JWK |
+| generateKey / importKey | AES-GCM 128/256，raw |
+| generateKey / importKey | AES-CBC 128/256，raw |
+| sign / verify | HMAC |
+| encrypt / decrypt | AES-GCM（12 字节 nonce，16 字节 tag） |
+| encrypt / decrypt | AES-CBC（PKCS7 padding，16 字节 IV） |
+| exportKey | HMAC → raw / JWK；AES → raw |
+
+### 安全实现要点
+
+- IV 长度严格校验（AES-GCM 必须 12 字节，AES-CBC 必须 16 字节）
+- PKCS7 unpad 使用 XOR 累积（常量时间，防 padding oracle 攻击）
+- keyID 通过 `crypto/rand.Read` 生成，失败时返回 error
 
 ---
 
 ## images.go — Netlify 图像 CDN
 
-### 职责
-
-模拟 Netlify 的 `/.netlify/images` 图像转换端点。`@astrojs/netlify` 适配器通过
-`image-service.js` 将所有 `<Image />` 组件的 URL 改写为此格式，生产环境由 Netlify
-内置图像 CDN 处理；本模块在本地开发/私有部署时提供等效实现。
-
 ### 入口函数
 
 ```go
-func HandleImageCDN(distDir string, w http.ResponseWriter, r *http.Request)
+func HandleImageCDN(distFS fs.FS, w http.ResponseWriter, r *http.Request)
 ```
+
+参数从 `fs.FS` 读取静态资产（兼容 zip 内存 FS 和 os.DirFS），支持相对路径和绝对 URL。
 
 ### 参数规范
 
-| 参数 | 说明 | 备注 |
-|------|------|------|
-| `url` | 源图像路径（相对）或绝对 URL | 相对路径不含前导 `/`（image-service.js 的 `removeLeadingForwardSlash` 处理） |
-| `fm` | 输出格式：`avif`, `jpg`, `png`, `webp` | 不支持的编码格式降级为 JPEG |
-| `w` | 目标宽度（像素） | 为 0 时按 h 等比推算 |
-| `h` | 目标高度（像素） | 为 0 时按 w 等比推算 |
-| `q` | 质量 1–100 | 缺省 75 |
-| `fit` | 裁切模式：`cover`、`contain`、`fill` | 缺省 `contain` |
+| 参数 | 说明 |
+|---|---|
+| `url` | 源图像路径（相对 distFS）或绝对 HTTP URL |
+| `fm` | 输出格式：jpg/png/webp/avif |
+| `w` / `h` | 目标尺寸（像素），0 时等比推算 |
+| `q` | 质量 1–100，默认 75 |
+| `fit` | cover / contain（默认）/ fill |
 
-### 内部函数
+### AVIF / WebP 降级策略
 
-**`openSource(distDir, rawURL)`**
+- AVIF 源文件：无纯 Go 解码器，直接 `http.ServeContent` 原始文件
+- WebP/AVIF 输出格式：降级为 JPEG 输出（纯 Go 无编码器）
 
-- 相对 URL → `os.Open(filepath.Join(distDir, rawURL))`
-- 绝对 URL → 复用 `fetchClient`（30s 超时 HTTP 客户端，定义于 runtime.go）
+### 绝对 URL 扩展名修复
 
-**`decodeImage(r, ext)`**
-
-| 格式 | 实现 | 备注 |
-|------|------|------|
-| `jpg`/`jpeg` | `image/jpeg`（stdlib） | |
-| `png` | `image/png`（stdlib） | |
-| `gif` | `image/gif`（stdlib） | |
-| `webp` | `golang.org/x/image/webp` | 仅解码，无编码器 |
-| `avif` | — | 返回 `errUnsupportedFormat`，触发 fallback |
-
-**`resizeImage(src, w, h, fit)`**
-
-使用 `golang.org/x/image/draw.BiLinear.Scale` 进行双线性插值缩放：
-
-```
-cover:   等比放大至填满 w×h → 裁中心区域
-contain: 等比缩放至 w×h 内（不裁切）
-fill:    直接拉伸至 w×h
-```
-
-**`encodeResponse(w, img, format, quality)`**
-
-```
-fm=png          → image/png（stdlib）
-fm=jpg/jpeg     → image/jpeg（stdlib，quality 参数生效）
-fm=webp/avif    → 降级为 image/jpeg（纯 Go 无 WebP/AVIF 编码器，开发环境可接受）
-```
-
-### AVIF 降级策略
-
-Go 无纯 Go AVIF 解码器（需 CGO + libavif），AVIF 源文件走 fallback 路径：
-直接 `http.ServeFile` 原始 `.avif` 文件，忽略 `w`/`h`/`fm` 等变换参数。
-现代浏览器（Chrome 85+、Firefox 93+、Safari 16+）原生支持 AVIF，页面图片可正常显示，
-仅失去尺寸裁剪能力，不影响本地开发。
+`openSource` 对 HTTP URL 返回 `name=""`，此时从 `rawURL` 路径中提取扩展名，
+避免 `ext=""` 触发 `errUnsupportedFormat`（415）。
 
 ---
 
-## server.go — HTTP 路由
+## glue.js — Go↔QJS 桥接
 
-### 路由优先级
+定义 `globalThis.__handleRequest(requestJSON: string): Promise<string>`。
 
-Netlify `preferStatic: true` 的本地模拟：
+流式输出顺序：
 
-```
-GET /path
-    │
-    ├─ /.netlify/images?...  → HandleImageCDN（图像 CDN，优先于 catch-all）
-    ├─ distDir/path 是文件？ → http.ServeFile
-    ├─ distDir/path/index.html 存在？ → http.ServeFile
-    └─ 否 → HandleSSR
+```javascript
+__go_sendHeaders(status, headersJSON)      // 立即写 HTTP status + headers → Flush
+for await (chunk of body)
+    __go_sendChunk(chunk.buffer)           // 写一个 body chunk → Flush
+__go_endStream(traceJSON)                  // 携带 trace spans，标记结束
 ```
 
-`/.netlify/images` 必须在 catch-all `/` 之前注册，否则 Go 的 `ServeMux` 会将其
-匹配到 `/` 路由而进入 SSR 处理器。
+---
 
-### 静态缓存策略
+## polyfills.go — JS Polyfill 嵌入声明
 
-`/_astro/` 前缀的资源（Astro 内容哈希文件）设置：
-```
-Cache-Control: public, max-age=31536000, immutable
-```
-
-其他静态文件使用 `http.ServeFile` 默认行为（支持 ETag 和 If-Modified-Since）。
+通过 `//go:embed` 将 `js/` 目录下 8 个 JS 文件编译进二进制，无运行时文件 I/O。

@@ -73,7 +73,13 @@
       // Only pass body for methods that allow it
       body: (d.method !== 'GET' && d.method !== 'HEAD' && d.body != null) ? d.body : undefined,
     });
-    var context = buildNetlifyContext(d.context);
+    // Allow per-request JS-side context injection.
+    // globalThis.__netlifyContextProvider = (rawCtx, req) => ({ ...rawCtx, ip: '...' });
+    var rawCtx = d.context || {};
+    if (typeof globalThis.__netlifyContextProvider === 'function') {
+      rawCtx = globalThis.__netlifyContextProvider(rawCtx, request) || rawCtx;
+    }
+    var context = buildNetlifyContext(rawCtx);
     _tend(_t);
 
     // __ssrHandler is the actual request handler returned by the adapter factory

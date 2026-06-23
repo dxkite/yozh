@@ -8,15 +8,18 @@ if (!globalThis.setTimeout) {
   var __timerId = 1;
   globalThis.setTimeout = function setTimeout(fn, delay) {
     var id = __timerId++;
-    if (!delay) {
-      Promise.resolve().then(function() { if (__timerMap[id] !== false) { delete __timerMap[id]; if (typeof fn === 'function') fn(); } });
-    }
     __timerMap[id] = true;
+    // QJS async-eval path has no OS event loop — all delays collapse to a single
+    // microtask tick. The callback is always executed (ignoring the delay value).
+    Promise.resolve().then(function() {
+      if (__timerMap[id] !== false) { delete __timerMap[id]; if (typeof fn === 'function') fn(); }
+    });
     return id;
   };
   globalThis.clearTimeout = function clearTimeout(id) { __timerMap[id] = false; };
-  globalThis.setInterval = function setInterval() { return 0; };
-  globalThis.clearInterval = function clearInterval() {};
+  // setInterval cannot truly repeat in QJS async-eval mode — fires once like setTimeout.
+  globalThis.setInterval = function setInterval(fn, delay) { return setTimeout(fn, delay); };
+  globalThis.clearInterval = function clearInterval(id) { __timerMap[id] = false; };
 }
 if (!globalThis.queueMicrotask) {
   globalThis.queueMicrotask = function queueMicrotask(fn) { Promise.resolve().then(fn); };

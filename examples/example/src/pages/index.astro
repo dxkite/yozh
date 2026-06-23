@@ -1,0 +1,37 @@
+---
+import { Image } from 'astro:assets';
+import testImage from '../assets/test.png';
+import { products } from '../models/db';
+
+const url = Astro.request.url;
+const method = Astro.request.method;
+const userAgent = Astro.request.headers.get('user-agent') ?? '(none)';
+const now = new Date().toISOString();
+---
+<!doctype html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Online Store</title></head>
+<body>
+  <Image src={testImage} width={32} height={32} alt="logo" />
+  <h1>Online Store</h1>
+  <p>URL: {url} | Method: {method} | Server time: {now}</p>
+  <p>User-Agent: {userAgent}</p>
+
+  <h2>Products</h2>
+  <ul>
+    {products.map(p => (
+      <li><a href={`/products/${p.id}`}>{p.name}</a> — ${p.price}</li>
+    ))}
+  </ul>
+  <p><a href="/cart">View Cart</a></p>
+
+  <h2>Feature Demos</h2>
+  <ul>
+    <li><a href="/greet/world">Dynamic route: /greet/world</a></li>
+    <li><a href="/api/time">API: GET /api/time</a></li>
+    <li><a href="/api/products">API: GET /api/products</a></li>
+    <li><a href="/api/summary">API: GET /api/summary (parallel fetch)</a></li>
+    <li><a href="/api/token">API: GET /api/token (HMAC sign)</a></li>
+  </ul>
+</body>
+</html>

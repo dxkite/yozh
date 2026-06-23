@@ -17,11 +17,12 @@ import (
 	astroruntime "github.com/dxkite/astro-runtime"
 )
 
-// Package-level pools initialized once in TestMain to avoid per-test QJS runtime startup cost.
+// Package-level pools and runtimes initialized once in TestMain.
 var (
-	sharedPool  *astroruntime.Pool // testapp-ssr bundle, size=4, for general SSR tests
-	sessionPool *astroruntime.Pool // testapp-ssr bundle, size=1, for TestCartSession (requires single runtime)
-	minPool     *astroruntime.Pool // eval-based minimal bundle, size=4, for polyfill/crypto/BFF tests
+	sharedPool  *astroruntime.Pool    // testapp-ssr bundle, size=4, for general SSR tests
+	sessionPool *astroruntime.Pool    // testapp-ssr bundle, size=1, for TestCartSession (requires single runtime)
+	minPool     *astroruntime.Pool    // eval-based minimal bundle, size=4, for polyfill/crypto/BFF tests
+	packRT      *astroruntime.Runtime // pack-based Runtime, for pack smoke tests
 )
 
 // minBundle is a minimal ESM bundle that evals arbitrary JS expressions via query param,
@@ -57,7 +58,7 @@ export default function(config) {
 `)
 
 func TestMain(m *testing.M) {
-	bundle, err := os.ReadFile(filepath.Join("testdata", "testapp-ssr", "bundle.mjs"))
+	bundle, err := os.ReadFile(filepath.Join("testdata", "example", "bundle.mjs"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "read testdata bundle: %v\n", err)
 		os.Exit(1)
@@ -82,6 +83,23 @@ func TestMain(m *testing.M) {
 	minPool, err = astroruntime.NewPool(minBundle, astroruntime.WithSize(4))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "NewPool minPool: %v\n", err)
+		os.Exit(1)
+	}
+
+	packData, err := os.ReadFile(filepath.Join("testdata", "example", "example.pack"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read example.pack: %v\n", err)
+		os.Exit(1)
+	}
+	packRT, err = astroruntime.NewRuntime(
+		astroruntime.WithPack(packData),
+		astroruntime.WithPoolOptions(
+			astroruntime.WithEnv(map[string]string{"NODE_ENV": "production"}),
+			astroruntime.WithSize(2),
+		),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "NewRuntime packRT: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -112,7 +130,11 @@ func do(t *testing.T, pool *astroruntime.Pool, method, path, cookie, body string
 		req.Header.Set("Content-Type", "application/json")
 	}
 	w := httptest.NewRecorder()
-	astroruntime.HandleSSR(pool, w, req)
+	rc, err := pool.RequestContext(w, req)
+	if err != nil {
+		t.Fatalf("RequestContext: %v", err)
+	}
+	astroruntime.HandleRequest(rc)
 	return w
 }
 
@@ -899,6 +921,54 @@ func TestBFFUpstreamHMACAuth(t *testing.T) {
 	}
 }
 
+// ── Pack Runtime smoke tests ──────────────────────────────────────────────────
+
+// doRT performs a single request through packRT.ServeHTTP.
+func doRT(t *testing.T, method, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req, err := http.NewRequest(method, "http://localhost"+path, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	w := httptest.NewRecorder()
+	packRT.ServeHTTP(w, req)
+	return w
+}
+
+func TestPackHomePage(t *testing.T) {
+	w := doRT(t, "GET", "/")
+	if w.Code != 200 {
+		t.Fatalf("status %d, want 200; body: %.200s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Online Store") {
+		t.Errorf("body missing 'Online Store'; got: %.200s", w.Body.String())
+	}
+}
+
+func TestPackProductsAPI(t *testing.T) {
+	w := doRT(t, "GET", "/api/products")
+	if w.Code != 200 {
+		t.Fatalf("status %d, want 200; body: %.200s", w.Code, w.Body.String())
+	}
+	var items []map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &items); err != nil {
+		t.Fatalf("JSON parse: %v — body: %.200s", err, w.Body.String())
+	}
+	if len(items) == 0 {
+		t.Errorf("expected non-empty product list")
+	}
+}
+
+func TestPackSingleProduct(t *testing.T) {
+	w := doRT(t, "GET", "/products/1")
+	if w.Code != 200 {
+		t.Fatalf("status %d, want 200; body: %.200s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Cereal") {
+		t.Errorf("body missing 'Cereal'; got: %.200s", w.Body.String())
+	}
+}
+
 // TestTextEncoderInto verifies encodeInto with partial buffer and correct read/written values.
 func TestTextEncoderInto(t *testing.T) {
 	r := evalExpr(t, minPool, `(function() {
@@ -929,5 +999,256 @@ func TestTextEncoderInto(t *testing.T) {
 	})()`)
 	if r["result"] != true {
 		t.Errorf("encodeInto ASCII+multibyte partial: %v", r["result"])
+	}
+}
+
+// ── NetlifyContext injection tests ────────────────────────────────────────────
+
+// contextBundle is a minimal bundle whose handler returns the full Netlify context as JSON.
+var contextBundle = []byte(`
+export default function() {
+  return async function handler(request, context) {
+    return new Response(JSON.stringify({
+      ip:        context.ip,
+      requestId: context.requestId,
+      geo:       context.geo,
+      site:      context.site,
+      deploy:    context.deploy,
+      account:   context.account,
+      server:    context.server,
+    }), {status: 200, headers: {'content-type': 'application/json'}});
+  };
+}
+`)
+
+// doH performs a single SSR request with caller-supplied headers.
+func doH(t *testing.T, pool *astroruntime.Pool, method, path string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req, err := http.NewRequest(method, "http://localhost"+path, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	rc, err := pool.RequestContext(w, req)
+	if err != nil {
+		t.Fatalf("RequestContext: %v", err)
+	}
+	astroruntime.HandleRequest(rc)
+	return w
+}
+
+// parseCtx unmarshals the context JSON returned by contextBundle.
+func parseCtx(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	if w.Code != 200 {
+		t.Fatalf("status %d, want 200; body: %.300s", w.Code, w.Body.String())
+	}
+	var ctx map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &ctx); err != nil {
+		t.Fatalf("JSON parse: %v — body: %s", err, w.Body.String())
+	}
+	return ctx
+}
+
+// TestContextDefaultExtraction verifies that IP is taken from the first value in
+// X-Forwarded-For and RequestID from X-Request-Id when no WithContextProvider is set.
+func TestContextDefaultExtraction(t *testing.T) {
+	p, err := astroruntime.NewPool(contextBundle, astroruntime.WithSize(1))
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	ctx := parseCtx(t, doH(t, p, "GET", "/", map[string]string{
+		"X-Forwarded-For": "1.2.3.4, 10.0.0.1",
+		"X-Request-Id":    "req-abc-123",
+	}))
+	if ctx["ip"] != "1.2.3.4" {
+		t.Errorf("ip: got %v, want '1.2.3.4'", ctx["ip"])
+	}
+	if ctx["requestId"] != "req-abc-123" {
+		t.Errorf("requestId: got %v, want 'req-abc-123'", ctx["requestId"])
+	}
+}
+
+// TestContextXRealIPFallback verifies that X-Real-Ip is used when X-Forwarded-For is absent.
+func TestContextXRealIPFallback(t *testing.T) {
+	p, err := astroruntime.NewPool(contextBundle, astroruntime.WithSize(1))
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	ctx := parseCtx(t, doH(t, p, "GET", "/", map[string]string{
+		"X-Real-Ip": "5.6.7.8",
+	}))
+	if ctx["ip"] != "5.6.7.8" {
+		t.Errorf("ip: got %v, want '5.6.7.8'", ctx["ip"])
+	}
+}
+
+// TestContextWithProvider verifies that WithContextProvider fully replaces default header
+// extraction and all injected fields (including nested Geo/Site/Server) reach the JS handler.
+func TestContextWithProvider(t *testing.T) {
+	p, err := astroruntime.NewPool(contextBundle,
+		astroruntime.WithSize(1),
+		astroruntime.WithContextProvider(func(r *http.Request) *astroruntime.NetlifyContext {
+			return &astroruntime.NetlifyContext{
+				IP:        "9.8.7.6",
+				RequestID: "provider-request-id",
+				Geo: &astroruntime.NetlifyGeo{
+					City:     "Tokyo",
+					Country:  &astroruntime.NetlifyGeoRegion{Code: "JP", Name: "Japan"},
+					Timezone: "Asia/Tokyo",
+				},
+				Site:    &astroruntime.NetlifySite{ID: "site-xyz", Name: "test-site", URL: "https://test.example.com"},
+				Deploy:  &astroruntime.NetlifyDeploy{ID: "deploy-42"},
+				Account: &astroruntime.NetlifyAccount{ID: "account-99"},
+				Server:  &astroruntime.NetlifyServer{Region: "ap-northeast-1"},
+			}
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	ctx := parseCtx(t, do(t, p, "GET", "/", "", ""))
+
+	if ctx["ip"] != "9.8.7.6" {
+		t.Errorf("ip: got %v, want '9.8.7.6'", ctx["ip"])
+	}
+	if ctx["requestId"] != "provider-request-id" {
+		t.Errorf("requestId: got %v, want 'provider-request-id'", ctx["requestId"])
+	}
+
+	geo, _ := ctx["geo"].(map[string]any)
+	if geo == nil {
+		t.Fatalf("geo is nil")
+	}
+	if geo["city"] != "Tokyo" {
+		t.Errorf("geo.city: got %v, want 'Tokyo'", geo["city"])
+	}
+	country, _ := geo["country"].(map[string]any)
+	if country == nil || country["code"] != "JP" {
+		t.Errorf("geo.country.code: got %v, want 'JP'", country)
+	}
+	if geo["timezone"] != "Asia/Tokyo" {
+		t.Errorf("geo.timezone: got %v, want 'Asia/Tokyo'", geo["timezone"])
+	}
+
+	site, _ := ctx["site"].(map[string]any)
+	if site == nil || site["id"] != "site-xyz" {
+		t.Errorf("site.id: got %v, want 'site-xyz'", site)
+	}
+	if site["name"] != "test-site" {
+		t.Errorf("site.name: got %v, want 'test-site'", site["name"])
+	}
+
+	deploy, _ := ctx["deploy"].(map[string]any)
+	if deploy == nil || deploy["id"] != "deploy-42" {
+		t.Errorf("deploy.id: got %v, want 'deploy-42'", deploy)
+	}
+
+	account, _ := ctx["account"].(map[string]any)
+	if account == nil || account["id"] != "account-99" {
+		t.Errorf("account.id: got %v, want 'account-99'", account)
+	}
+
+	server, _ := ctx["server"].(map[string]any)
+	if server == nil || server["region"] != "ap-northeast-1" {
+		t.Errorf("server.region: got %v, want 'ap-northeast-1'", server)
+	}
+}
+
+// TestContextProviderOverridesHeaders verifies that a registered WithContextProvider takes
+// precedence over X-Forwarded-For / X-Request-Id headers.
+func TestContextProviderOverridesHeaders(t *testing.T) {
+	p, err := astroruntime.NewPool(contextBundle,
+		astroruntime.WithSize(1),
+		astroruntime.WithContextProvider(func(r *http.Request) *astroruntime.NetlifyContext {
+			return &astroruntime.NetlifyContext{IP: "fixed-ip", RequestID: "fixed-id"}
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	ctx := parseCtx(t, doH(t, p, "GET", "/", map[string]string{
+		"X-Forwarded-For": "should-be-ignored",
+		"X-Request-Id":    "should-be-ignored",
+	}))
+	if ctx["ip"] != "fixed-ip" {
+		t.Errorf("ip: got %v, want 'fixed-ip'", ctx["ip"])
+	}
+	if ctx["requestId"] != "fixed-id" {
+		t.Errorf("requestId: got %v, want 'fixed-id'", ctx["requestId"])
+	}
+}
+
+// TestContextDefaultFallbacks verifies that fields not provided by the Go context (Geo, Site, etc.)
+// fall back to the mock defaults defined in glue.js buildNetlifyContext.
+func TestContextDefaultFallbacks(t *testing.T) {
+	p, err := astroruntime.NewPool(contextBundle, astroruntime.WithSize(1))
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	req, _ := http.NewRequest("GET", "http://localhost/", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	w := httptest.NewRecorder()
+	rc, _ := p.RequestContext(w, req)
+	astroruntime.HandleRequest(rc)
+	ctx := parseCtx(t, w)
+
+	geo, _ := ctx["geo"].(map[string]any)
+	if geo == nil {
+		t.Fatalf("geo should not be nil (expected glue.js fallback)")
+	}
+	if geo["city"] != "Mock City" {
+		t.Errorf("geo.city fallback: got %v, want 'Mock City'", geo["city"])
+	}
+	country, _ := geo["country"].(map[string]any)
+	if country == nil || country["code"] != "US" {
+		t.Errorf("geo.country.code fallback: got %v, want 'US'", country)
+	}
+
+	site, _ := ctx["site"].(map[string]any)
+	if site == nil || site["id"] != "mock-site-id" {
+		t.Errorf("site.id fallback: got %v, want 'mock-site-id'", site)
+	}
+
+	server, _ := ctx["server"].(map[string]any)
+	if server == nil || server["region"] != "local" {
+		t.Errorf("server.region fallback: got %v, want 'local'", server)
+	}
+}
+
+// TestContextJSProviderHook verifies that globalThis.__netlifyContextProvider registered in
+// the SSR bundle can override raw context fields at request time.
+func TestContextJSProviderHook(t *testing.T) {
+	bundle := []byte(`
+export default function() {
+  globalThis.__netlifyContextProvider = function(rawCtx, req) {
+    return Object.assign({}, rawCtx, {ip: 'js-injected-ip', requestId: 'js-injected-id'});
+  };
+  return async function handler(request, context) {
+    return new Response(JSON.stringify({ip: context.ip, requestId: context.requestId}),
+      {status: 200, headers: {'content-type': 'application/json'}});
+  };
+}
+`)
+	p, err := astroruntime.NewPool(bundle, astroruntime.WithSize(1))
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	w := do(t, p, "GET", "/", "", "")
+	if w.Code != 200 {
+		t.Fatalf("status %d; body: %.200s", w.Code, w.Body.String())
+	}
+	var ctx map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &ctx); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if ctx["ip"] != "js-injected-ip" {
+		t.Errorf("ip: got %v, want 'js-injected-ip'", ctx["ip"])
+	}
+	if ctx["requestId"] != "js-injected-id" {
+		t.Errorf("requestId: got %v, want 'js-injected-id'", ctx["requestId"])
 	}
 }

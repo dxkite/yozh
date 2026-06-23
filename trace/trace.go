@@ -77,6 +77,20 @@ func Start(ctx context.Context, name string) *Span {
 	return &Span{s: s}
 }
 
+// StartAt begins a named span with a pre-captured start time.
+// Use when the logical start of the span occurred in a different goroutine.
+func StartAt(ctx context.Context, name string, start time.Time) *Span {
+	t, _ := ctx.Value(ctxKey{}).(*requestTrace)
+	if t == nil {
+		return &Span{}
+	}
+	s := &span{name: name, start: start}
+	t.mu.Lock()
+	t.spans = append(t.spans, s)
+	t.mu.Unlock()
+	return &Span{s: s}
+}
+
 // SetJSCheckpoints stores JS-side timestamps into the trace carried by ctx.
 // They are printed as sub-entries under the js.eval span.
 // Does nothing when ctx carries no trace.

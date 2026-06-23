@@ -1,16 +1,106 @@
 package main
 
 import (
-	"flag"
+	"context"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	astroruntime "github.com/dxkite/astro-runtime"
 	"github.com/dxkite/astro-runtime/trace"
+	"github.com/spf13/cobra"
 )
+
+func main() {
+	root := &cobra.Command{
+		Use:          "astro-runtime",
+		Short:        "Astro SSR runtime server",
+		SilenceUsage: true,
+	}
+	root.AddCommand(buildCmd(), serveCmd())
+	if err := root.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// ── build ─────────────────────────────────────────────────────────────────────
+
+func buildCmd() *cobra.Command {
+	var entry, out, distDir string
+	var plain, bytecode, pack bool
+
+	cmd := &cobra.Command{
+		Use:   "build",
+		Short: "Bundle Astro SSR output (--plain / --bytecode / --pack)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			absEntry, err := filepath.Abs(entry)
+			if err != nil {
+				return fmt.Errorf("resolve --entry: %w", err)
+			}
+			if _, err := os.Stat(absEntry); os.IsNotExist(err) {
+				return fmt.Errorf("entry not found: %s\n(run `astro build` first)", absEntry)
+			}
+
+			start := time.Now()
+			log.Printf("[build] entry: %s", absEntry)
+			jsCode, err := astroruntime.BundleSSR(absEntry)
+			if err != nil {
+				return fmt.Errorf("esbuild: %w", err)
+			}
+			log.Printf("[build] JS bundle: %d KB", len(jsCode)/1024)
+
+			switch {
+			case plain:
+				outPath := resolveOut(out, ".netlify/build/bundle.mjs")
+				if err := writeOut(outPath, jsCode); err != nil {
+					return err
+				}
+				logDone(start, len(jsCode)/1024, outPath)
+
+			case bytecode:
+				outPath := resolveOut(out, ".netlify/build/bundle.bc")
+				log.Printf("[build] compiling to QuickJS bytecode ...")
+				bc, err := astroruntime.CompileBundleBytecode(jsCode)
+				if err != nil {
+					return fmt.Errorf("compile: %w", err)
+				}
+				if err := writeOut(outPath, bc); err != nil {
+					return err
+				}
+				logDone(start, len(bc)/1024, outPath)
+
+			case pack:
+				outPath := resolveOut(out, ".netlify/build/bundle.pack")
+				absDist, _ := filepath.Abs(distDir)
+				log.Printf("[build] compiling and packing ...")
+				if err := astroruntime.BuildPack(outPath, jsCode, absDist); err != nil {
+					return fmt.Errorf("pack: %w", err)
+				}
+				fi, _ := os.Stat(outPath)
+				logDone(start, int(fi.Size())/1024, outPath)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&entry, "entry", ".netlify/build/entry.mjs", "path to SSR entry .mjs")
+	cmd.Flags().BoolVar(&plain, "plain", false, "output a self-contained JS bundle (.mjs)")
+	cmd.Flags().BoolVar(&bytecode, "bytecode", false, "output raw QuickJS bytecode (.bc)")
+	cmd.Flags().BoolVar(&pack, "pack", false, "output a deployable pack (.pack) with bundle.mjs + bundle.bc + dist/")
+	cmd.Flags().StringVar(&out, "out", "", "output path (default depends on mode)")
+	cmd.Flags().StringVar(&distDir, "dist", "dist", "static output directory (included in --pack)")
+
+	cmd.MarkFlagsMutuallyExclusive("plain", "bytecode", "pack")
+	cmd.MarkFlagsOneRequired("plain", "bytecode", "pack")
+
+	return cmd
+}
+
+// ── serve ─────────────────────────────────────────────────────────────────────
 
 func defaultCacheDir() string {
 	d, err := os.UserCacheDir()
@@ -20,279 +110,174 @@ func defaultCacheDir() string {
 	return filepath.Join(d, "astro-runtime")
 }
 
-func main() {
-	// Dispatch to subcommand when the first argument is a known command name.
-	// Fall through to serve for backward compatibility (flags starting with "-").
-	if len(os.Args) >= 2 {
-		switch os.Args[1] {
-		case "bundle-ssr":
-			cmdBundleSSR(os.Args[2:])
-			return
-		case "bundle-ssr-bin":
-			cmdBundleSSRBin(os.Args[2:])
-			return
-		case "serve":
-			cmdServe(os.Args[2:])
-			return
-		case "help", "-h", "--help":
-			printUsage()
-			return
-		}
+func serveCmd() *cobra.Command {
+	var packPath, entry, bundle, distDir, cacheDir string
+	var port int
+	var traceFlag bool
+
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Start the Astro SSR server (--pack / --entry / --bundle)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if traceFlag {
+				trace.Enable()
+			}
+
+			// Auto-detect when nothing is specified.
+			if packPath == "" && entry == "" && bundle == "" {
+				switch {
+				case fileExists(".netlify/build/bundle.pack"):
+					packPath = ".netlify/build/bundle.pack"
+				case fileExists(".netlify/build/bundle.mjs"):
+					bundle = ".netlify/build/bundle.mjs"
+				default:
+					entry = ".netlify/build/entry.mjs"
+				}
+			}
+
+			addr := fmt.Sprintf(":%d", port)
+
+			if packPath != "" {
+				return serveFromPack(packPath, addr, cacheDir)
+			}
+
+			absDist, err := filepath.Abs(distDir)
+			if err != nil {
+				return fmt.Errorf("resolve --dist: %w", err)
+			}
+
+			var jsCode []byte
+			if bundle != "" {
+				absBundle, err := filepath.Abs(bundle)
+				if err != nil {
+					return fmt.Errorf("resolve --bundle: %w", err)
+				}
+				if _, err := os.Stat(absBundle); os.IsNotExist(err) {
+					return fmt.Errorf("bundle not found: %s", absBundle)
+				}
+				log.Printf("Loading bundle %s ...", absBundle)
+				jsCode, err = os.ReadFile(absBundle)
+				if err != nil {
+					return fmt.Errorf("read bundle: %w", err)
+				}
+			} else {
+				absEntry, err := filepath.Abs(entry)
+				if err != nil {
+					return fmt.Errorf("resolve --entry: %w", err)
+				}
+				if _, err := os.Stat(absEntry); os.IsNotExist(err) {
+					return fmt.Errorf("entry not found: %s\n(run `astro build` first)", absEntry)
+				}
+				log.Printf("Bundling %s ...", absEntry)
+				jsCode, err = astroruntime.BundleSSR(absEntry)
+				if err != nil {
+					return fmt.Errorf("bundle: %w", err)
+				}
+			}
+
+			rt, err := astroruntime.NewRuntime(
+				astroruntime.WithBundle(jsCode),
+				astroruntime.WithDistDir(absDist),
+				astroruntime.WithCacheDir(cacheDir),
+				astroruntime.WithPoolOptions(astroruntime.WithEnv(envMap())),
+			)
+			if err != nil {
+				return fmt.Errorf("runtime init: %w", err)
+			}
+			defer rt.Close()
+
+			log.Printf("QJS pool ready")
+			log.Printf("Netlify SSR mock running at http://localhost%s", addr)
+			log.Printf("  dist: %s", absDist)
+			return serveWithShutdown(rt, addr)
+		},
 	}
-	// Default: serve (backward compatible with the original single-command binary).
-	cmdServe(os.Args[1:])
+
+	cmd.Flags().StringVar(&packPath, "pack", "", "path to .pack file (bundle.bc + dist/)")
+	cmd.Flags().StringVar(&entry, "entry", "", "path to SSR entry .mjs (bundled at startup)")
+	cmd.Flags().StringVar(&bundle, "bundle", "", "path to pre-bundled .mjs")
+	cmd.Flags().IntVar(&port, "port", 8888, "port to listen on")
+	cmd.Flags().StringVar(&distDir, "dist", "dist", "static output directory (not used with --pack)")
+	cmd.Flags().BoolVar(&traceFlag, "trace", false, "print per-request span timing to stderr")
+	cmd.Flags().StringVar(&cacheDir, "cache-dir", defaultCacheDir(), "bundle bytecode cache directory (empty to disable)")
+
+	cmd.MarkFlagsMutuallyExclusive("pack", "entry", "bundle")
+
+	return cmd
 }
 
-func printUsage() {
-	fmt.Fprintf(os.Stderr, "Usage: %s <command> [flags]\n\nCommands:\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "  serve           Start the Netlify SSR mock server (default)\n")
-	fmt.Fprintf(os.Stderr, "  bundle-ssr      Pre-bundle an Astro SSR entry.mjs into a self-contained bundle.mjs\n")
-	fmt.Fprintf(os.Stderr, "  bundle-ssr-bin  Bundle + compile to QuickJS bytecode (.jsbc); fastest cold start\n")
-}
-
-// cmdBundleSSRBin bundles an Astro SSR entry to JS (via esbuild) then compiles the result
-// to a QuickJS bytecode set (.jsbc). The output file can be passed to serve --bytecodes,
-// which skips both esbuild and JS parsing for the fastest possible cold start.
-func cmdBundleSSRBin(args []string) {
-	fs := flag.NewFlagSet("bundle-ssr-bin", flag.ExitOnError)
-	entry := fs.String("entry", "", "path to SSR entry .mjs (requires node_modules; mutually exclusive with --bundle)")
-	bundle := fs.String("bundle", "", "path to pre-bundled .mjs (skips esbuild; mutually exclusive with --entry)")
-	out := fs.String("out", ".netlify/build/bundle.jsbc", "path to write the compiled bytecode set")
-	if err := fs.Parse(args); err != nil {
-		log.Fatal(err)
-	}
-
-	if *entry == "" && *bundle == "" {
-		defaultBundle := ".netlify/build/bundle.mjs"
-		defaultEntry := ".netlify/build/entry.mjs"
-		if _, err := os.Stat(defaultBundle); err == nil {
-			*bundle = defaultBundle
-		} else {
-			*entry = defaultEntry
-		}
-	}
-	if *entry != "" && *bundle != "" {
-		log.Fatal("--entry and --bundle are mutually exclusive")
-	}
-
-	absOut, err := filepath.Abs(*out)
+// serveFromPack loads a .pack file and starts the server via the Runtime SDK.
+func serveFromPack(packPath, addr, cacheDir string) error {
+	absPackPath, err := filepath.Abs(packPath)
 	if err != nil {
-		log.Fatalf("resolve --out: %v", err)
+		return fmt.Errorf("resolve --pack: %w", err)
+	}
+	if _, err := os.Stat(absPackPath); os.IsNotExist(err) {
+		return fmt.Errorf("pack not found: %s", absPackPath)
 	}
 
-	start := time.Now()
-	var jsCode []byte
-
-	if *bundle != "" {
-		absBundle, err := filepath.Abs(*bundle)
-		if err != nil {
-			log.Fatalf("resolve --bundle: %v", err)
-		}
-		if _, err := os.Stat(absBundle); os.IsNotExist(err) {
-			log.Fatalf("bundle not found: %s", absBundle)
-		}
-		log.Printf("[bundle-ssr-bin] bundle: %s", absBundle)
-		jsCode, err = os.ReadFile(absBundle)
-		if err != nil {
-			log.Fatalf("[bundle-ssr-bin] read bundle: %v", err)
-		}
-	} else {
-		absEntry, err := filepath.Abs(*entry)
-		if err != nil {
-			log.Fatalf("resolve --entry: %v", err)
-		}
-		if _, err := os.Stat(absEntry); os.IsNotExist(err) {
-			log.Fatalf("entry not found: %s\n(run `astro build` first)", absEntry)
-		}
-		log.Printf("[bundle-ssr-bin] entry: %s", absEntry)
-		jsCode, err = astroruntime.BundleSSR(absEntry)
-		if err != nil {
-			log.Fatalf("[bundle-ssr-bin] esbuild: %v", err)
-		}
-		log.Printf("[bundle-ssr-bin] JS bundle: %d KB", len(jsCode)/1024)
-	}
-
-	log.Printf("[bundle-ssr-bin] out:   %s", absOut)
-	log.Printf("[bundle-ssr-bin] compiling to QuickJS bytecode ...")
-
-	if err := os.MkdirAll(filepath.Dir(absOut), 0o755); err != nil {
-		log.Fatalf("[bundle-ssr-bin] mkdir: %v", err)
-	}
-	if err := astroruntime.CompileBytecodeSet(jsCode, absOut); err != nil {
-		log.Fatalf("[bundle-ssr-bin] compile: %v", err)
-	}
-
-	info, err := os.Stat(absOut)
+	rt, err := astroruntime.NewRuntime(
+		astroruntime.WithPackFile(absPackPath),
+		astroruntime.WithCacheDir(cacheDir),
+		astroruntime.WithPoolOptions(astroruntime.WithEnv(envMap())),
+	)
 	if err != nil {
-		log.Fatalf("[bundle-ssr-bin] stat output: %v", err)
+		return fmt.Errorf("runtime init: %w", err)
 	}
-	log.Printf("[bundle-ssr-bin] done in %dms — %d KB → %s", time.Since(start).Milliseconds(), info.Size()/1024, absOut)
-}
+	defer rt.Close()
 
-// cmdBundleSSR pre-bundles an Astro SSR entry.mjs → bundle.mjs using esbuild.
-// Equivalent to the Node.js scripts/bundle-ssr.mjs helper but runs purely in Go.
-func cmdBundleSSR(args []string) {
-	fs := flag.NewFlagSet("bundle-ssr", flag.ExitOnError)
-	entry := fs.String("entry", ".netlify/build/entry.mjs", "path to SSR entry .mjs")
-	out := fs.String("out", ".netlify/build/bundle.mjs", "path to write the self-contained bundle")
-	if err := fs.Parse(args); err != nil {
-		log.Fatal(err)
-	}
-
-	absEntry, err := filepath.Abs(*entry)
-	if err != nil {
-		log.Fatalf("resolve --entry: %v", err)
-	}
-	absOut, err := filepath.Abs(*out)
-	if err != nil {
-		log.Fatalf("resolve --out: %v", err)
-	}
-
-	if _, err := os.Stat(absEntry); os.IsNotExist(err) {
-		log.Fatalf("entry not found: %s\n(run `astro build` first)", absEntry)
-	}
-
-	log.Printf("[bundle-ssr] entry: %s", absEntry)
-	log.Printf("[bundle-ssr] out:   %s", absOut)
-
-	start := time.Now()
-	code, err := astroruntime.BundleSSR(absEntry)
-	if err != nil {
-		log.Fatalf("[bundle-ssr] %v", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(absOut), 0o755); err != nil {
-		log.Fatalf("[bundle-ssr] mkdir: %v", err)
-	}
-	if err := os.WriteFile(absOut, code, 0o644); err != nil {
-		log.Fatalf("[bundle-ssr] write: %v", err)
-	}
-
-	log.Printf("[bundle-ssr] done in %dms — %d KB → %s", time.Since(start).Milliseconds(), len(code)/1024, absOut)
-}
-
-func cmdServe(args []string) {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	port := fs.Int("port", 8888, "port to listen on")
-	ssrPath := fs.String("ssr", "", "path to SSR entry .mjs (requires node_modules; bundled at startup)")
-	bundlePath := fs.String("bundle", "", "path to pre-bundled .mjs (no node_modules needed; skips esbuild)")
-	bytecodesPath := fs.String("bytecodes", "", "path to pre-compiled .jsbc (fastest startup; skips esbuild and JS parsing)")
-	distDir := fs.String("dist", "dist", "path to Astro's built static output directory")
-	traceFlag := fs.Bool("trace", false, "print per-request span timing to stderr")
-	cacheDir := fs.String("cache-dir", defaultCacheDir(), "bytecode cache directory (empty string to disable)")
-	if err := fs.Parse(args); err != nil {
-		log.Fatal(err)
-	}
-
-	if *traceFlag {
-		trace.Enable()
-	}
-
-	absDist, err := filepath.Abs(*distDir)
-	if err != nil {
-		log.Fatalf("resolve --dist path: %v", err)
-	}
-
-	// --bytecodes: load pre-compiled bytecode set, skip JS entirely.
-	if *bytecodesPath != "" {
-		absBC, err := filepath.Abs(*bytecodesPath)
-		if err != nil {
-			log.Fatalf("resolve --bytecodes: %v", err)
-		}
-		if _, err := os.Stat(absBC); os.IsNotExist(err) {
-			log.Fatalf("bytecodes file not found: %s\n(run `astro-runtime bundle-ssr-bin` first)", absBC)
-		}
-		log.Printf("Initializing QJS pool from bytecodes %s ...", absBC)
-		poolOpts := []astroruntime.PoolOption{
-			astroruntime.WithEnv(envMap()),
-			astroruntime.WithPrecompiledBytecodes(absBC),
-		}
-		pool, err := astroruntime.NewPool(nil, poolOpts...)
-		if err != nil {
-			log.Fatalf("pool init: %v", err)
-		}
-		defer pool.Close()
-		log.Printf("QJS pool ready")
-		addr := fmt.Sprintf(":%d", *port)
-		log.Printf("Netlify SSR mock running at http://localhost%s", addr)
-		log.Printf("  dist:      %s", absDist)
-		log.Printf("  bytecodes: %s", absBC)
-		if err := astroruntime.StartServer(pool, absDist, addr); err != nil {
-			log.Fatal(err)
-		}
-		return
-	}
-
-	// Auto-detect default inputs when nothing is specified.
-	if *ssrPath == "" && *bundlePath == "" {
-		defaultEntry := ".netlify/build/entry.mjs"
-		defaultBundle := ".netlify/build/bundle.mjs"
-		if _, err := os.Stat(defaultBundle); err == nil {
-			*bundlePath = defaultBundle
-		} else {
-			*ssrPath = defaultEntry
-		}
-	}
-
-	var bundleCode []byte
-
-	if *bundlePath != "" {
-		absBundlePath, err := filepath.Abs(*bundlePath)
-		if err != nil {
-			log.Fatalf("resolve --bundle path: %v", err)
-		}
-		if _, err := os.Stat(absBundlePath); os.IsNotExist(err) {
-			log.Fatalf("bundle file not found: %s\n(run `pnpm build:prod` first)", absBundlePath)
-		}
-		log.Printf("Loading pre-bundled %s ...", absBundlePath)
-		bundleCode, err = os.ReadFile(absBundlePath)
-		if err != nil {
-			log.Fatalf("read bundle: %v", err)
-		}
-		log.Printf("Bundle ready (%d bytes / %d KB)", len(bundleCode), len(bundleCode)/1024)
-	} else {
-		absSSR, err := filepath.Abs(*ssrPath)
-		if err != nil {
-			log.Fatalf("resolve --ssr path: %v", err)
-		}
-		if _, err := os.Stat(absSSR); os.IsNotExist(err) {
-			log.Fatalf("SSR entry not found: %s\n(run `astro build` first)", absSSR)
-		}
-		log.Printf("Bundling %s ...", absSSR)
-		bundleCode, err = astroruntime.BundleSSR(absSSR)
-		if err != nil {
-			log.Fatalf("bundle: %v", err)
-		}
-		log.Printf("Bundle ready (%d bytes / %d KB)", len(bundleCode), len(bundleCode)/1024)
-	}
-	if len(bundleCode) < 10000 {
-		log.Printf("Bundle content (small, dumping): %s", string(bundleCode))
-	}
-
-	log.Printf("Initializing QJS pool ...")
-	poolOpts := []astroruntime.PoolOption{astroruntime.WithEnv(envMap())}
-	if *cacheDir != "" {
-		poolOpts = append(poolOpts, astroruntime.WithBytecodeCache(*cacheDir))
-	}
-	pool, err := astroruntime.NewPool(bundleCode, poolOpts...)
-	if err != nil {
-		log.Fatalf("pool init: %v", err)
-	}
-	defer pool.Close()
 	log.Printf("QJS pool ready")
-
-	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("Netlify SSR mock running at http://localhost%s", addr)
-	log.Printf("  dist:   %s", absDist)
-	if *bundlePath != "" {
-		log.Printf("  bundle: %s", *bundlePath)
-	} else {
-		log.Printf("  ssr:    %s", *ssrPath)
-	}
+	log.Printf("  pack: %s", absPackPath)
+	return serveWithShutdown(rt, addr)
+}
 
-	if err := astroruntime.StartServer(pool, absDist, addr); err != nil {
-		log.Fatal(err)
+// serveWithShutdown runs rt.ListenAndServe and gracefully shuts down on SIGTERM/SIGINT.
+func serveWithShutdown(rt *astroruntime.Runtime, addr string) error {
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(quit)
+
+	go func() {
+		<-quit
+		log.Printf("shutting down ...")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := rt.Shutdown(ctx); err != nil {
+			log.Printf("shutdown: %v", err)
+		}
+	}()
+
+	return rt.ListenAndServe(addr)
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func resolveOut(out, def string) string {
+	if out == "" {
+		out = def
 	}
+	abs, err := filepath.Abs(out)
+	if err != nil {
+		log.Fatalf("resolve --out: %v", err)
+	}
+	return abs
+}
+
+func writeOut(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func logDone(start time.Time, sizeKB int, path string) {
+	log.Printf("[build] done in %dms — %d KB → %s", time.Since(start).Milliseconds(), sizeKB, path)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func envMap() map[string]string {

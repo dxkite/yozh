@@ -1,0 +1,12 @@
+services:
+  astro:
+    build: .
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - ${PACK_FILE:-./bundle.pack}:/data/bundle.pack:ro
+      - pack-cache:/cache
+    restart: unless-stopped
+
+volumes:
+  pack-cache:
