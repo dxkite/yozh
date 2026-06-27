@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/dxkite/astro-runtime/trace"
 	"github.com/dxkite/qjs"
@@ -25,6 +26,7 @@ type poolConfig struct {
 	bundleCacheDir    string
 	precompiledBundle []byte
 	contextProvider   func(*http.Request) *NetlifyContext
+	requestTimeout    time.Duration // 0 = no timeout; applied per request via context.WithTimeout
 }
 
 // PoolOption configures a QJS runtime pool.
@@ -84,6 +86,14 @@ func WithContextProvider(fn func(*http.Request) *NetlifyContext) PoolOption {
 	return func(c *poolConfig) { c.contextProvider = fn }
 }
 
+// WithRequestTimeout sets a per-request deadline applied via context.WithTimeout.
+// When the deadline is exceeded, Await() in the QJS event loop returns ctx.Err()
+// and the eval returns an error, releasing the pool slot immediately.
+// 0 (default) means no per-request timeout.
+func WithRequestTimeout(d time.Duration) PoolOption {
+	return func(c *poolConfig) { c.requestTimeout = d }
+}
+
 // pooledRuntime wraps a QJS runtime with a per-request streaming channel.
 // streamCh is allocated fresh by HandleRequest before each request.
 // The pool guarantees exclusive access per request.
@@ -105,6 +115,7 @@ type Pool struct {
 	bundleCacheDir    string
 	precompiledBundle []byte
 	contextProvider   func(*http.Request) *NetlifyContext
+	requestTimeout    time.Duration
 }
 
 // NewPool creates a pool of QJS runtimes, each initialized with:
@@ -148,6 +159,7 @@ func NewPool(bundleCode []byte, opts ...PoolOption) (*Pool, error) {
 		bundleCacheDir:    cfg.bundleCacheDir,
 		precompiledBundle: cfg.precompiledBundle,
 		contextProvider:   cfg.contextProvider,
+		requestTimeout:    cfg.requestTimeout,
 		qjsOpt: qjs.Option{
 			MemoryLimit:      cfg.memoryLimit,
 			MaxStackSize:     cfg.maxStackSize,

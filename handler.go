@@ -73,6 +73,7 @@ type RequestContext struct {
 	pool      *Pool
 	prt       *pooledRuntime
 	goCtx     context.Context
+	cancel    context.CancelFunc // non-nil when a per-request timeout was applied
 	w         http.ResponseWriter
 	r         *http.Request
 	tailCh    chan responseInfo // buffer=1; worker blocks here until main confirms response timing
@@ -80,7 +81,12 @@ type RequestContext struct {
 	spanLog   *spanLog         // internal timing collector for ssr spans log
 }
 
-func (rc *RequestContext) release() { rc.pool.Put(rc.prt) }
+func (rc *RequestContext) release() {
+	if rc.cancel != nil {
+		rc.cancel()
+	}
+	rc.pool.Put(rc.prt)
+}
 
 // RequestContext creates a per-request execution context, checking out a pooled QJS runtime.
 // The caller MUST pass the returned *RequestContext to HandleRequest, which releases the runtime.
@@ -95,6 +101,14 @@ func (p *Pool) RequestContext(w http.ResponseWriter, r *http.Request) (*RequestC
 		slog.String("client_ip", clientIP(r)),
 		slog.String("user_agent", r.Header.Get("User-Agent")),
 	)
+
+	// Apply per-request timeout if configured so Await() in the QJS event loop
+	// respects the deadline and releases the pool slot instead of looping forever.
+	var cancel context.CancelFunc
+	if p.requestTimeout > 0 {
+		goCtx, cancel = context.WithTimeout(goCtx, p.requestTimeout)
+	}
+
 	poolGetStart := time.Now()
 	prt, err := p.Get(goCtx)
 	poolGetEnd := time.Now()
@@ -102,12 +116,16 @@ func (p *Pool) RequestContext(w http.ResponseWriter, r *http.Request) (*RequestC
 		rt.PoolGetDone(poolGetStart, poolGetEnd)
 	}
 	if err != nil {
+		if cancel != nil {
+			cancel()
+		}
 		return nil, err
 	}
 	return &RequestContext{
 		pool:      p,
 		prt:       prt,
 		goCtx:     goCtx,
+		cancel:    cancel,
 		w:         w,
 		r:         r,
 		tailCh:    make(chan responseInfo, 1),
