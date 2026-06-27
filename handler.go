@@ -361,10 +361,28 @@ func HandleRequest(rc *RequestContext) {
 	flusher, canFlush := w.(http.Flusher)
 
 	responseStart := time.Now()
-	for sig = range ch {
+readLoop:
+	for {
+		select {
+		case <-goCtx.Done():
+			// Request timed out or client disconnected before stream finished.
+			rtlog.WarnContext(goCtx, "chunked response interrupted", "cause", context.Cause(goCtx))
+			for range ch {}
+			rc.tailCh <- responseInfo{}
+			return
+		case sig, ok = <-ch:
+			if !ok {
+				break readLoop
+			}
+		}
 		switch sig.Kind {
 		case sigChunk:
-			w.Write(sig.Chunk)
+			if _, werr := w.Write(sig.Chunk); werr != nil {
+				rtlog.ErrorContext(goCtx, "chunked write failed", "err", werr)
+				for range ch {}
+				rc.tailCh <- responseInfo{}
+				return
+			}
 			if canFlush {
 				flusher.Flush()
 			}
@@ -396,7 +414,8 @@ func HandleRequest(rc *RequestContext) {
 			return
 		}
 	}
-	// Channel closed without sigDone (e.g., JS threw mid-stream without endStream).
+	// Channel closed without sigDone — JS threw mid-stream without calling endStream.
+	rtlog.WarnContext(goCtx, "response channel closed without sigDone")
 	rc.tailCh <- responseInfo{}
 }
 
