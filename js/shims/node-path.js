@@ -3,14 +3,19 @@ export const sep = '/';
 export const normalize = (p) => {
   var abs = p[0] === '/';
   var out = [];
+  var leading = 0; // leading ".." count that couldn't be resolved (relative paths only)
   var segs = p.split('/');
   for (var i = 0; i < segs.length; i++) {
     var s = segs[i];
     if (s === '' || s === '.') continue;
-    if (s === '..') { if (out.length > 0) out.pop(); }
-    else out.push(s);
+    if (s === '..') {
+      if (out.length > 0) out.pop();
+      else if (!abs) leading++;
+    } else {
+      out.push(s);
+    }
   }
-  var r = out.join('/');
+  var r = (leading ? Array(leading).fill('..').concat(out) : out).join('/');
   return abs ? '/' + r : (r || '.');
 };
 

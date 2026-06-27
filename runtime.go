@@ -6,7 +6,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"os"
+	"log/slog"
+	"net/url"
 	"time"
 
 	"github.com/dxkite/astro-runtime/trace"
@@ -41,11 +42,11 @@ type ResponseSignal struct {
 	BodyTime      time.Time            // sigHeader: time.Now() when headers are ready
 }
 
-//go:embed glue.js
-var glueJS string
+//go:embed bootstrap.mjs
+var bootstrapMJS string
 
 // setupRuntime initializes a single QJS runtime using pre-compiled bytecodes.
-// Order is critical: host functions → polyfills → ESM bundle → handler setup → glue.
+// Order is critical: host functions → polyfills → entry bundle → bootstrap.
 func setupRuntime(prt *pooledRuntime, bcs *bytecodeSet, env map[string]string) error {
 	rt := prt.rt
 	ctx := rt.Context()
@@ -58,7 +59,7 @@ func setupRuntime(prt *pooledRuntime, bcs *bytecodeSet, env map[string]string) e
 
 	// __go_sendHeaders(status, headersJSON) — first streaming event; signals HandleSSR to write
 	// HTTP status and headers immediately, before body chunks are available.
-	ctx.SetGoFunc("__go_sendHeaders", func(_ context.Context, args ...any) (any, error) {
+	setGoFunc(ctx, "__go_sendHeaders", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 2 {
 			return nil, nil
 		}
@@ -76,7 +77,7 @@ func setupRuntime(prt *pooledRuntime, bcs *bytecodeSet, env map[string]string) e
 
 	// __go_sendChunk(buf ArrayBuffer) — streams one body chunk to HandleSSR.
 	// Blocks until HandleSSR reads the chunk, providing natural back-pressure.
-	ctx.SetGoFunc("__go_sendChunk", func(_ context.Context, args ...any) (any, error) {
+	setGoFunc(ctx, "__go_sendChunk", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 1 {
 			return nil, nil
 		}
@@ -96,7 +97,7 @@ func setupRuntime(prt *pooledRuntime, bcs *bytecodeSet, env map[string]string) e
 	})
 
 	// __go_endStream(traceJSON) — final streaming event; HandleSSR records trace and returns.
-	ctx.SetGoFunc("__go_endStream", func(_ context.Context, args ...any) (any, error) {
+	setGoFunc(ctx, "__go_endStream", func(_ context.Context, args ...any) (any, error) {
 		var points []trace.JSCheckpoint
 		if len(args) > 0 {
 			if s, _ := args[0].(string); s != "" {
@@ -123,43 +124,26 @@ func setupRuntime(prt *pooledRuntime, bcs *bytecodeSet, env map[string]string) e
 
 	// 3. Evaluate the pre-compiled ESM bundle bytecode in module mode.
 	// The bundle has no external imports (all Node builtins inlined by esbuild).
-	factory, err := ctx.Eval("ssr.mjs", qjs.Bytecode(bcs.bundle), qjs.TypeModule())
+	v, err := ctx.Eval("entry.mjs", qjs.Bytecode(bcs.bundle), qjs.TypeModule())
 	if err != nil {
 		return fmt.Errorf("bundle eval: %w", err)
 	}
-
-	// 4. Extract the SSR handler from the module's default export.
-	// The default export is the handler (length>=2) or a factory (length<2) that returns
-	// the handler when called with an empty config object.
-	ctx.Global().SetPropertyStr("__ssrHandlerFactory", factory)
-	factory.Free()
-
-	v, err := ctx.Eval("setup-handler.js", qjs.Code(`(function() {
-  var raw = globalThis.__ssrHandlerFactory;
-  if (typeof raw === 'function' && raw.length < 2) {
-    var candidate = raw({});
-    globalThis.__ssrHandler = (typeof candidate === 'function') ? candidate : raw;
-  } else {
-    globalThis.__ssrHandler = raw;
-  }
-  delete globalThis.__ssrHandlerFactory;
-})()`))
-	if err != nil {
-		return fmt.Errorf("handler setup: %w", err)
-	}
 	v.Free()
 
-	// 5. Evaluate glue adapter bytecode — defines globalThis.__handleRequest
-	v, err = ctx.Eval("glue.js", qjs.Bytecode(bcs.glue))
+	// 4. bootstrap: detects adapter export format, initializes __ssrHandler,
+	// and defines globalThis.__handleRequest.
+	// Evaluated here (not pre-compiled) because it imports from entry.mjs, which
+	// is only in the module cache after step 3.
+	v, err = ctx.Eval("bootstrap.mjs", qjs.Code(bootstrapMJS), qjs.TypeModule())
 	if err != nil {
-		return fmt.Errorf("glue eval: %w", err)
+		return fmt.Errorf("bootstrap eval: %w", err)
 	}
 	v.Free()
 
 	return nil
 }
 
-// parseJSTrace decodes the JSON trace emitted by glue.js into JSCheckpoint slices.
+// parseJSTrace decodes the JSON trace emitted by bootstrap.mjs into JSCheckpoint slices.
 // Format: [{name: string, s: epochMs, e: epochMs}, ...]
 func parseJSTrace(jsonStr string) []trace.JSCheckpoint {
 	var raw []struct {
@@ -181,7 +165,34 @@ func parseJSTrace(jsonStr string) []trace.JSCheckpoint {
 	return out
 }
 
+// setGoFunc wraps ctx.SetGoFunc to automatically record JSCallDone timing on the RequestTrace.
+func setGoFunc(ctx *qjs.Context, name string, fn func(context.Context, ...any) (any, error)) {
+	ctx.SetGoFunc(name, func(goCtx context.Context, args ...any) (any, error) {
+		start := time.Now()
+		result, err := fn(goCtx, args...)
+		if rt := trace.ContextRequestTrace(goCtx); rt != nil && rt.JSCallDone != nil {
+			rt.JSCallDone(name, start, time.Now(), err)
+		}
+		return result, err
+	})
+}
+
+// setGoAsyncFunc wraps ctx.SetGoAsyncFunc to automatically record JSCallDone timing.
+func setGoAsyncFunc(ctx *qjs.Context, name string, fn func(context.Context, ...any) (any, error)) {
+	ctx.SetGoAsyncFunc(name, func(goCtx context.Context, args ...any) (any, error) {
+		start := time.Now()
+		result, err := fn(goCtx, args...)
+		if rt := trace.ContextRequestTrace(goCtx); rt != nil && rt.JSCallDone != nil {
+			rt.JSCallDone(name, start, time.Now(), err)
+		}
+		return result, err
+	})
+}
+
 // injectHostFunctions registers Go-backed globals on the QJS context.
+// Host functions receive ctx (*qjs.Context, which embeds context.Context) as their first argument.
+// The embedded context.Context is replaced with the per-request Go context before each Eval,
+// so ctx.Value / ctx.Done carry per-request log attrs and cancellation signals automatically.
 func injectHostFunctions(ctx *qjs.Context, env map[string]string, keyReg map[string]*cryptoKey) error {
 	// process.env — injected as both __processEnv and process.env
 	envJSON, _ := json.Marshal(env)
@@ -203,7 +214,7 @@ try {
 	v.Free()
 
 	// __go_cryptoRandomBytes(n) — returns ArrayBuffer of n cryptographically-random bytes
-	ctx.SetGoFunc("__go_cryptoRandomBytes", func(_ context.Context, args ...any) (any, error) {
+	setGoFunc(ctx, "__go_cryptoRandomBytes", func(goCtx context.Context, args ...any) (any, error) {
 		if len(args) == 0 {
 			return nil, fmt.Errorf("__go_cryptoRandomBytes requires 1 argument")
 		}
@@ -211,23 +222,36 @@ try {
 		if n <= 0 || n > 65536 {
 			return nil, fmt.Errorf("__go_cryptoRandomBytes: invalid size %d", n)
 		}
+		start := time.Now()
 		buf := make([]byte, n)
 		if _, err := rand.Read(buf); err != nil {
 			return nil, fmt.Errorf("rand.Read: %w", err)
 		}
+		rtlog.DebugContext(goCtx, "__go_cryptoRandomBytes", "n", n, "latency", time.Since(start).Seconds())
 		return buf, nil
 	})
 
-	// __go_consoleWrite(level, message) — forwards to Go stderr
-	ctx.SetGoFunc("__go_consoleWrite", func(_ context.Context, args ...any) (any, error) {
-		level, msg := "log", ""
+	// __go_consoleWrite(level, message) — forwards JS console.* to slog
+	setGoFunc(ctx, "__go_consoleWrite", func(goCtx context.Context, args ...any) (any, error) {
+		jsLevel, msg := "log", ""
 		if len(args) > 0 {
-			level, _ = args[0].(string)
+			jsLevel, _ = args[0].(string)
 		}
 		if len(args) > 1 {
 			msg, _ = args[1].(string)
 		}
-		fmt.Fprintf(os.Stderr, "[JS %s] %s\n", level, msg)
+		var lvl slog.Level
+		switch jsLevel {
+		case "error", "assert":
+			lvl = slog.LevelError
+		case "warn":
+			lvl = slog.LevelWarn
+		case "debug", "trace":
+			lvl = slog.LevelDebug
+		default:
+			lvl = slog.LevelInfo
+		}
+		rtlog.Log(goCtx, lvl, msg, "source", "js")
 		return "", nil
 	})
 
@@ -240,7 +264,7 @@ try {
 	// the returned JS Promise via the QJS pendingCallbacks channel.
 	// Promise.allSettled([fetch(a), fetch(b), fetch(c)]) launches all goroutines
 	// concurrently; the QJS event loop drains the channel as each one completes.
-	ctx.SetGoAsyncFunc("__go_fetchRaw", func(_ context.Context, args ...any) (any, error) {
+	setGoAsyncFunc(ctx, "__go_fetchRaw", func(goCtx context.Context, args ...any) (any, error) {
 		urlStr, method, headersJSON, reqBody := "", "GET", "{}", ""
 		if len(args) > 0 {
 			urlStr, _ = args[0].(string)
@@ -256,7 +280,24 @@ try {
 				reqBody = s
 			}
 		}
-		return goFetch(urlStr, method, headersJSON, reqBody)
+		// Log only the path portion to avoid exposing upstream base URL in every log line.
+		logPath := urlStr
+		if u, err := url.Parse(urlStr); err == nil {
+			logPath = u.Path
+		}
+		fetchStart := time.Now()
+		result, status, err := goFetch(urlStr, method, headersJSON, reqBody)
+		fetchEnd := time.Now()
+		latency := fetchEnd.Sub(fetchStart)
+		if err != nil {
+			rtlog.DebugContext(goCtx, "__go_fetchRaw", "fetch_method", method, "fetch_path", logPath, "err", err, "latency", latency.Seconds())
+		} else {
+			rtlog.DebugContext(goCtx, "__go_fetchRaw", "fetch_method", method, "fetch_path", logPath, "latency", latency.Seconds())
+		}
+		if rt := trace.ContextRequestTrace(goCtx); rt != nil && rt.FetchDone != nil {
+			rt.FetchDone(method, logPath, status, fetchStart, fetchEnd, err)
+		}
+		return result, err
 	})
 
 	return nil

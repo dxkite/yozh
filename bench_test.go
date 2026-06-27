@@ -49,29 +49,13 @@ func setupRuntimeLegacy(rt *qjs.Runtime, bundleCode []byte, env map[string]strin
 		v.Free()
 	}
 
-	factory, err := ctx.Eval("ssr.mjs", qjs.Code(string(bundleCode)), qjs.TypeModule())
-	if err != nil {
-		return err
-	}
-	ctx.Global().SetPropertyStr("__ssrHandlerFactory", factory)
-	factory.Free()
-
-	v, err := ctx.Eval("setup-handler.js", qjs.Code(`(function() {
-  var raw = globalThis.__ssrHandlerFactory;
-  if (typeof raw === 'function' && raw.length < 2) {
-    var candidate = raw({});
-    globalThis.__ssrHandler = (typeof candidate === 'function') ? candidate : raw;
-  } else {
-    globalThis.__ssrHandler = raw;
-  }
-  delete globalThis.__ssrHandlerFactory;
-})()`))
+	v, err := ctx.Eval("entry.mjs", qjs.Code(string(bundleCode)), qjs.TypeModule())
 	if err != nil {
 		return err
 	}
 	v.Free()
 
-	v, err = ctx.Eval("glue.js", qjs.Code(glueJS))
+	v, err = ctx.Eval("bootstrap.mjs", qjs.Code(bootstrapMJS), qjs.TypeModule())
 	if err != nil {
 		return err
 	}

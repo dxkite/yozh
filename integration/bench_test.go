@@ -60,7 +60,7 @@ func BenchmarkSSRRequestGetPut(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		rt, err := p.Get()
+		rt, err := p.Get(b.Context())
 		if err != nil {
 			b.Fatal(err)
 		}

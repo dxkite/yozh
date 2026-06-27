@@ -124,8 +124,10 @@ WithBundle      → 直接传 jsCode 给 NewPool（可选 WithBundleCache）
 ```go
 func (rt *Runtime) ServeHTTP(w http.ResponseWriter, r *http.Request)
 func (rt *Runtime) ListenAndServe(addr string) error
+func (rt *Runtime) Shutdown(ctx context.Context) error  // 优雅关闭：在 ctx 截止前排空在途请求，之后再调 Close()
 func (rt *Runtime) Pool() *Pool
 func (rt *Runtime) DistFS() fs.FS
+func (rt *Runtime) Stats() PoolStats
 func (rt *Runtime) Close()
 ```
 
@@ -134,10 +136,14 @@ func (rt *Runtime) Close()
 ```
 请求
 ├─ path == "/.netlify/images" → HandleImageCDN(distFS, w, r)
-├─ distFS 中有对应文件       → serveStaticFS（/_astro/* 加 immutable 缓存头）
+├─ distFS 中有对应文件       → serveStaticFS
+│     /_astro/* → Cache-Control: public, max-age=31536000, immutable
+│     其他资产  → Cache-Control: public, max-age=3600
 ├─ distFS 中有 path/index.html → serveStaticFS
 └─ 否 → pool.RequestContext → HandleRequest（SSR 池）
 ```
+
+ServeHTTP 捕获所有 panic，返回 HTTP 500 并记录日志。
 
 ### StartServer（向后兼容）
 
@@ -161,14 +167,17 @@ func BundleSSR(entryPath string) ([]byte, error)
 
 | 选项 | 值 | 原因 |
 |---|---|---|
-| `Format` | `FormatCommonJS` | QJS 需要单文件 CJS，一次 `ctx.Eval` 完成加载 |
-| `Platform` | `PlatformNeutral` | 不注入 Node/Browser 特定 shim |
-| `Target` | `ES2020` | QJS（QuickJS-NG）支持 ES2020+ |
+| `Format` | `FormatESModule` | QJS 使用 `TypeModule()` 加载，需要 ESM 格式 |
+| `Platform` | `PlatformNeutral` | 不注入 Node.js/浏览器特有 shim |
+| `Target` | `ES2023` | QJS（QuickJS-NG）支持 ES2020+，ES2023 特性已充分覆盖 |
 | `Write` | `false` | 输出到内存，不写磁盘 |
-| `MainFields` | `["module", "main"]` | 优先使用 ESM 源码 |
+| `Conditions` | `["require", "node", "import", "default"]` | `require` 优先选取包的 CJS 发行版，避免 ESM 版拉入兄弟包 |
+| `MainFields` | `["main", "module", "browser"]` | `main` 优先 CJS，覆盖无 `exports` map 的老旧包 |
+| `Define` | `{"process.env.NODE_ENV": '"production'"}` | 编译期替换，esbuild dead-code elimination 删除开发路径 |
+| `Sourcemap` | `SourceMapNone` | 去除 source map，减小 bundle 体积 |
+| `LogLevel` | `LogLevelSilent` | 错误通过返回值传递，不污染 stderr |
 
-所有 `node:*` 和裸 Node 内置（`fs`、`path`、`crypto` 等）标记为 external，
-由 runtime.go 中的 `require` shim 处理。
+所有 `node:*` 和裸 Node 内置由 `nodeShimPlugin` 在 esbuild 打包阶段替换为 `js/shims/` 中的轻量 ESM stub（详见 [bundle.md](./bundle.md)）。
 
 ---
 
@@ -195,14 +204,35 @@ func (p *Pool) RequestContext(w, r) (*RequestContext, error)
 
 | 函数 | 默认 | 说明 |
 |---|---|---|
-| `WithEnv(env map[string]string)` | `os.Environ()` | 注入 process.env |
+| `WithEnv(env map[string]string)` | `{}` | 注入 process.env（不传则为空 map） |
 | `WithSize(n int)` | clamp(NumCPU, 2, 8) | Pool 大小，范围 [1, 1000]；0 = 自动 |
-| `WithMemoryLimit(bytes int)` | 128MB | 每个 QJS 实例内存上限 |
-| `WithMaxStackSize(bytes int)` | — | JS 调用栈大小 |
-| `WithMaxExecutionTime(ms int)` | — | 单次请求执行超时（毫秒） |
-| `WithGCThreshold(bytes int)` | — | GC 触发阈值 |
-| `WithPrecompiledBundle(bc []byte)` | — | 传入预编译字节码，跳过编译步骤 |
-| `WithBundleCache(dir string)` | — | 字节码磁盘缓存目录 |
+| `WithMemoryLimit(bytes int)` | 0（无限制） | 每个 QJS 实例 WASM 堆上限（0 = 不限） |
+| `WithMaxStackSize(bytes int)` | 0（默认 256 KB） | JS 调用栈大小（0 = 引擎默认） |
+| `WithMaxExecutionTime(ms int)` | 0（不限） | 单次 Eval 执行超时（毫秒；0 = 不限） |
+| `WithGCThreshold(bytes int)` | 0（引擎默认） | GC 触发阈值（0 = 引擎默认） |
+| `WithPrecompiledBundle(bc []byte)` | — | 传入预编译字节码，跳过 bundle 编译步骤（polyfill 仍每次编译） |
+| `WithBundleCache(dir string)` | `""` | 字节码磁盘缓存目录；缓存 key = SHA256(bundle + vcs.revision) |
+| `WithContextProvider(fn func(*http.Request) *NetlifyContext)` | — | 注册每请求的 NetlifyContext 构建函数，覆盖默认 IP 提取和 RequestID 逻辑 |
+
+### PoolStats
+
+```go
+type PoolStats struct {
+    Size int  // pool 总容量
+    Idle int  // 当前空闲 runtime 数
+    Busy int  // 当前使用中 runtime 数
+}
+```
+
+通过 `Pool.Stats()` 或 `Runtime.Stats()` 获取瞬时快照（非原子操作，仅供监控参考）。
+
+### Pool 方法
+
+```go
+func (p *Pool) Stats() PoolStats      // 返回瞬时快照
+func (p *Pool) Close()                // 停止所有 worker goroutine
+func (p *Pool) RequestContext(w http.ResponseWriter, r *http.Request) (*RequestContext, error)
+```
 
 ### Pool 语义（有界阻塞）
 
@@ -264,7 +294,7 @@ func HandleRequest(rc *RequestContext)
 8. consoleDef（js/console.js）
 9. fetchDef（js/fetch.js）
 10. CJS bundle（带 require shim 包装的 Astro SSR bundle）
-11. glue.js（定义 __handleRequest）
+11. bootstrap.mjs（定义 __handleRequest）
 ```
 
 ---
@@ -324,9 +354,15 @@ func HandleImageCDN(distFS fs.FS, w http.ResponseWriter, r *http.Request)
 
 ---
 
-## glue.js — Go↔QJS 桥接
+## bootstrap.mjs — Go↔QJS 桥接
 
-定义 `globalThis.__handleRequest(requestJSON: string): Promise<string>`。
+通过 `//go:embed bootstrap.mjs` 嵌入到 Go 二进制，在 QJS 运行时初始化的最后一步 eval。
+
+主要职责：
+- 检测 Netlify adapter 的导出格式（工厂函数 vs 直接 handler）
+- 初始化 `globalThis.__ssrHandler`
+- 定义 `globalThis.__handleRequest(requestJSON: string): Promise<void>`
+- 支持 `globalThis.__netlifyContextProvider(rawCtx, req)` 的 JS 侧注入（由 `WithContextProvider` 触发）
 
 流式输出顺序：
 
@@ -339,6 +375,20 @@ __go_endStream(traceJSON)                  // 携带 trace spans，标记结束
 
 ---
 
+## logx.go — 结构化日志
+
+```go
+func NewLogger(h slog.Handler) *slog.Logger
+func SetLogger(l *slog.Logger)
+```
+
+| 函数 | 说明 |
+|---|---|
+| `NewLogger(h slog.Handler)` | 用 `h` 构造 `*slog.Logger`，自动注入每请求的 context 字段（method、path、status、latency）。构建自定义 logger 时应通过此函数而非直接 `slog.New(h)` |
+| `SetLogger(l *slog.Logger)` | 替换全局 runtime logger。在接受任何请求前调用。benchmark 中传入 `slog.New(slog.NewTextHandler(io.Discard, nil))` 可屏蔽日志 |
+
+---
+
 ## polyfills.go — JS Polyfill 嵌入声明
 
-通过 `//go:embed` 将 `js/` 目录下 8 个 JS 文件编译进二进制，无运行时文件 I/O。
+通过 `//go:embed` 将 `js/` 目录下的 Web API polyfill 文件编译进二进制，无运行时文件 I/O。

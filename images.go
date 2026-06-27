@@ -8,7 +8,6 @@ import (
 	"image/png"
 	"io"
 	"io/fs"
-	"log"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -59,7 +58,7 @@ func HandleImageCDN(distFS fs.FS, w http.ResponseWriter, r *http.Request) {
 		// Unsupported decode (e.g. AVIF) → serve original file as-is.
 		rc.Close()
 		if name != "" {
-			log.Printf("[image-cdn] cannot decode %s (%v), serving original", ext, err)
+			rtlog.WarnContext(r.Context(), "image-cdn cannot decode, serving original", "ext", ext, "err", err)
 			// Re-open and serve raw bytes (rc was unread for unknown formats).
 			if f, err2 := distFS.Open(name); err2 == nil {
 				defer f.Close()

@@ -27,7 +27,7 @@ Runtime.ServeHTTP（server.go）— 路由分发
                QJS (dxkite/qjs → QuickJS-NG via wazero)
                  ├── js/         — Web API polyfills（8 个 JS 文件，//go:embed 嵌入）
                  ├── bundle CJS  — Astro SSR bundle（esbuild 打包；字节码缓存至磁盘）
-                 └── glue.js     — __handleRequest: JSON → Request → __ssrHandler → 流式输出
+                 └── bootstrap.mjs — __handleRequest: JSON → Request → __ssrHandler → 流式输出
                     │  __go_sendHeaders / __go_sendChunk / __go_endStream
                     ▼
                Go: 流式写入 HTTP 响应（headers → chunks → done）
@@ -63,7 +63,7 @@ serve --pack
 | `runtime.go` | QJS Runtime 初始化（`setupRuntime`），注入 host functions |
 | `polyfills.go` | `//go:embed` 声明，将 `js/` 下的 8 个 JS 文件嵌入二进制 |
 | `crypto_subtle.go` | Web Crypto API Go 实现（digest、HMAC、AES-GCM/CBC、JWK） |
-| `glue.js` | Go↔QJS 桥接，定义 `__handleRequest`，流式输出 headers/chunks |
+| `bootstrap.mjs` | Go↔QJS 桥接，检测 adapter 格式，定义 `__handleRequest`，流式输出 headers/chunks |
 | `handler.go` | 单次请求处理（`RequestContext`、`HandleRequest`），流式写响应 |
 | `images.go` | `/.netlify/images` 图像 CDN：参数解析、解码、resize/crop、编码 |
 
@@ -85,7 +85,7 @@ serve --pack
 
 10. CJS bundle（esbuild 打包的 Astro SSR，带 require shim 包装）
 
-11. glue.js（定义 __handleRequest）
+11. bootstrap.mjs（检测 adapter 格式，定义 __handleRequest）
 ```
 
 ## 关键设计决策
@@ -100,13 +100,28 @@ Astro 用 `Object.prototype.toString.call(process) === "[object process]"` 判�
 
 bundle 中 `require("node:stream/web")` 主动 throw，触发 bundle 内置 web-streams-polyfill fallback。
 
-### 3. Netlify adapter 二级工厂
+### 3. Netlify adapter 多版本兼容
 
-`createExports` 返回 `{ default: createHandler }`，CJS wrapper 末尾调用工厂：
+不同版本的 `@astrojs/netlify` 导出格式不同，bootstrap.mjs 统一处理：
+
 ```javascript
-var __rawExport = module.exports.default || module.exports;
-return typeof __rawExport === 'function' ? __rawExport({}) : __rawExport;
+// Astro ≤v4：default export（函数）
+// Astro v6+：named export createHandler
+var _rawFactory = (typeof _entry.default === 'function')
+  ? _entry.default
+  : _entry.createHandler;
+
+// factory（.length < 2）：先调用工厂获得 handler
+// direct handler（.length >= 2）：直接使用
+if (typeof _rawFactory === 'function' && _rawFactory.length < 2) {
+  var _h = _rawFactory({});
+  __ssrHandler = (typeof _h === 'function') ? _h : _rawFactory;
+} else {
+  __ssrHandler = _rawFactory;
+}
 ```
+
+`_rawFactory.length < 2` 是区分"工厂函数"与"直接 handler"的判断依据，与 node_server.mjs 的逻辑完全一致。
 
 ### 4. 双重 JSON 编码传参
 
@@ -115,7 +130,7 @@ return typeof __rawExport === 'function' ? __rawExport({}) : __rawExport;
 
 ### 5. AsyncIterable body 流式传输
 
-glue.js 不缓冲全部 body，逐 chunk 通过 `__go_sendChunk` 推给 Go，实现真正的流式传输。
+bootstrap.mjs 不缓冲全部 body，逐 chunk 通过 `__go_sendChunk` 推给 Go，实现真正的流式传输。
 Go 端 handler.go 通过带缓冲 channel（size=1）接收 `sigHeader` / `sigChunk` / `sigDone`，
 写入 HTTP 响应并 Flush，客户端渐进接收。
 
@@ -148,7 +163,7 @@ if invalid != 0 { return nil, fmt.Errorf("invalid padding") }
 
 ### 10. 字节码磁盘缓存
 
-以 SHA256(bundle || polyfills || glue) 为 key，`bytecodeSet` gob 序列化到磁盘。
+以 SHA256(bundle || polyfills || bootstrap) 为 key，`bytecodeSet` gob 序列化到磁盘。
 命中缓存时冷启动 <100ms（vs 首次编译 ~1.5s）。
 
 ### 11. QJS 事件循环优化（`QJS_DrainEventLoop`）
@@ -193,7 +208,7 @@ QJS: __handleRequest(jsonStr)
 QJS: __ssrHandler(request, context)
     │ Astro router → renderToAsyncIterable → AsyncGenerator<Uint8Array>
     ▼
-QJS: glue.js 流式输出
+QJS: bootstrap.mjs 流式输出
     │ __go_sendHeaders → Go: WriteHeader + Flush
     │ for await chunk: __go_sendChunk → Go: Write + Flush
     │ __go_endStream(traceJSON) → Go: 记录 trace，handler 返回

@@ -1183,7 +1183,7 @@ func TestContextProviderOverridesHeaders(t *testing.T) {
 }
 
 // TestContextDefaultFallbacks verifies that fields not provided by the Go context (Geo, Site, etc.)
-// fall back to the mock defaults defined in glue.js buildNetlifyContext.
+// fall back to the mock defaults defined in bootstrap.mjs buildNetlifyContext.
 func TestContextDefaultFallbacks(t *testing.T) {
 	p, err := astroruntime.NewPool(contextBundle, astroruntime.WithSize(1))
 	if err != nil {
@@ -1198,7 +1198,7 @@ func TestContextDefaultFallbacks(t *testing.T) {
 
 	geo, _ := ctx["geo"].(map[string]any)
 	if geo == nil {
-		t.Fatalf("geo should not be nil (expected glue.js fallback)")
+		t.Fatalf("geo should not be nil (expected bootstrap.mjs fallback)")
 	}
 	if geo["city"] != "Mock City" {
 		t.Errorf("geo.city fallback: got %v, want 'Mock City'", geo["city"])
@@ -1216,6 +1216,64 @@ func TestContextDefaultFallbacks(t *testing.T) {
 	server, _ := ctx["server"].(map[string]any)
 	if server == nil || server["region"] != "local" {
 		t.Errorf("server.region fallback: got %v, want 'local'", server)
+	}
+}
+
+// ── Netlify adapter export format tests ──────────────────────────────────────
+
+// TestNetlifyAdapterFormats verifies that bootstrap.mjs resolves the SSR handler
+// correctly for all three Netlify adapter export patterns supported by astro-runtime:
+//
+//   - Astro ≤v4 factory:   export default function(opts) { return async handler }
+//   - Astro ≤v5 handler:   export default async function handler(req, ctx) { ... }
+//   - Astro  v6 named:     export function createHandler(opts) { return async handler }
+//
+// The "factory" pattern has length<2, so bootstrap.mjs calls it with {} to obtain
+// the real handler. The "handler" pattern has length≥2 and is used directly.
+// The "named" pattern has no default export; bootstrap.mjs falls back to ns.createHandler.
+func TestNetlifyAdapterFormats(t *testing.T) {
+	cases := []struct {
+		name     string
+		wantBody string
+		bundle   []byte
+	}{
+		{
+			name:     "default_export_factory",
+			wantBody: "default-factory",
+			bundle: []byte(`export default function factory(opts) {
+  return async function(request, context) { return new Response('default-factory'); };
+}`),
+		},
+		{
+			name:     "default_export_handler",
+			wantBody: "default-handler",
+			bundle: []byte(`export default async function handler(request, context) {
+  return new Response('default-handler');
+}`),
+		},
+		{
+			name:     "named_createHandler_v6",
+			wantBody: "named-createHandler",
+			bundle: []byte(`export function createHandler(opts) {
+  return async function(request, context) { return new Response('named-createHandler'); };
+}`),
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, err := astroruntime.NewPool(c.bundle, astroruntime.WithSize(1))
+			if err != nil {
+				t.Fatalf("NewPool: %v", err)
+			}
+			w := do(t, p, "GET", "/", "", "")
+			if w.Code != 200 {
+				t.Fatalf("status %d, want 200; body: %.200s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), c.wantBody) {
+				t.Errorf("body: got %.200s, want to contain %q", w.Body.String(), c.wantBody)
+			}
+		})
 	}
 }
 

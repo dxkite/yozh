@@ -1,14 +1,15 @@
 package astroruntime
 
 import (
+	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
 
+	"github.com/dxkite/astro-runtime/trace"
 	"github.com/dxkite/qjs"
 )
 
@@ -197,7 +198,7 @@ func (p *Pool) newRuntime() (*pooledRuntime, error) {
 			key := bundleCacheKey(p.bundleCode)
 			cachePath := filepath.Join(p.bundleCacheDir, key+".bc")
 			if bc, err := os.ReadFile(cachePath); err == nil {
-				log.Printf("bundle cache hit: %s", cachePath)
+				rtlog.Debug("bundle cache hit", "path", cachePath)
 				bundleBC = bc
 			}
 		}
@@ -209,7 +210,7 @@ func (p *Pool) newRuntime() (*pooledRuntime, error) {
 			cachePath := filepath.Join(p.bundleCacheDir, key+".bc")
 			if mkErr := os.MkdirAll(p.bundleCacheDir, 0755); mkErr == nil {
 				if saveErr := os.WriteFile(cachePath, p.bcs.bundle, 0644); saveErr == nil {
-					log.Printf("bundle cache saved: %s", cachePath)
+					rtlog.Debug("bundle cache saved", "path", cachePath)
 				}
 			}
 		}
@@ -229,7 +230,16 @@ func (p *Pool) newRuntime() (*pooledRuntime, error) {
 
 // Get checks out a runtime. Caller MUST call Put() when done.
 // Blocks until a runtime is available (bounded pool — never exceeds size).
-func (p *Pool) Get() (*pooledRuntime, error) {
+// ctx is used to call PoolWaiting on the RequestTrace if the pool has no idle runtimes.
+func (p *Pool) Get(ctx context.Context) (*pooledRuntime, error) {
+	select {
+	case prt := <-p.pool:
+		return prt, nil
+	default:
+		if rt := trace.ContextRequestTrace(ctx); rt != nil && rt.PoolWaiting != nil {
+			rt.PoolWaiting()
+		}
+	}
 	prt := <-p.pool
 	return prt, nil
 }
@@ -244,10 +254,14 @@ func (p *Pool) Put(prt *pooledRuntime) {
 }
 
 // submit sends fn to a worker goroutine. Falls back to a temporary goroutine if all workers are busy.
-func (p *Pool) submit(fn func()) {
+// ctx is used to call WorkerFallback on the RequestTrace when the fallback path is taken.
+func (p *Pool) submit(ctx context.Context, fn func()) {
 	select {
 	case p.workers <- fn:
 	default:
+		if rt := trace.ContextRequestTrace(ctx); rt != nil && rt.WorkerFallback != nil {
+			rt.WorkerFallback()
+		}
 		go fn()
 	}
 }

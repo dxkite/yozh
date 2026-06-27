@@ -12,6 +12,7 @@
 | [components.md](./components.md) | 各 Go/JS 文件的职责、接口、实现细节 |
 | [polyfills.md](./polyfills.md) | 每个 polyfill 的存在原因、边界、已知局限 |
 | [testing.md](./testing.md) | 测试环境、测试用例（51 个）、调试问题记录 |
+| [benchmark.md](./benchmark.md) | astro-runtime vs Node.js SSR：吞吐量、延迟、镜像大小、资源消耗对比 |
 
 ## 快速开始
 
@@ -66,7 +67,6 @@ astro-runtime serve [--pack path | --bundle path | --entry path] [--dist dir] [-
 | `--dist` | `dist` | 静态输出目录（--bundle/--entry 时使用） |
 | `--port` | `8888` | 监听端口 |
 | `--cache-dir` | `$XDG_CACHE_HOME/astro-runtime` | 字节码/pack 解压缓存目录（空字符串禁用） |
-| `--trace` | false | 打印每次请求的 span 耗时到 stderr |
 
 自动检测：未指定任何模式时，按 `bundle.pack` → `bundle.mjs` → `entry.mjs` 顺序探测。
 

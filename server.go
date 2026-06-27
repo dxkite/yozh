@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"net/http"
 	"os"
 	"path"
@@ -235,7 +234,7 @@ func (rt *Runtime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		if v := recover(); v != nil {
-			log.Printf("panic: %v\n%s", v, debug.Stack())
+			rtlog.Error("recovered from panic", "err", v, "stack", string(debug.Stack()))
 			http.Error(w, fmt.Sprintf("internal server error: %v", v), http.StatusInternalServerError)
 		}
 	}()

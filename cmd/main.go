@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	astroruntime "github.com/dxkite/astro-runtime"
-	"github.com/dxkite/astro-runtime/trace"
 	"github.com/spf13/cobra"
 )
 
@@ -113,15 +113,14 @@ func defaultCacheDir() string {
 func serveCmd() *cobra.Command {
 	var packPath, entry, bundle, distDir, cacheDir string
 	var port int
-	var traceFlag bool
 
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the Astro SSR server (--pack / --entry / --bundle)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if traceFlag {
-				trace.Enable()
-			}
+			jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+			slog.SetDefault(slog.New(jsonHandler))
+			astroruntime.SetLogger(astroruntime.NewLogger(jsonHandler))
 
 			// Auto-detect when nothing is specified.
 			if packPath == "" && entry == "" && bundle == "" {
@@ -135,10 +134,11 @@ func serveCmd() *cobra.Command {
 				}
 			}
 
+			ctx := cmd.Context()
 			addr := fmt.Sprintf(":%d", port)
 
 			if packPath != "" {
-				return serveFromPack(packPath, addr, cacheDir)
+				return serveFromPack(ctx, packPath, addr, cacheDir)
 			}
 
 			absDist, err := filepath.Abs(distDir)
@@ -155,7 +155,7 @@ func serveCmd() *cobra.Command {
 				if _, err := os.Stat(absBundle); os.IsNotExist(err) {
 					return fmt.Errorf("bundle not found: %s", absBundle)
 				}
-				log.Printf("Loading bundle %s ...", absBundle)
+				slog.InfoContext(ctx, "loading bundle", "path", absBundle)
 				jsCode, err = os.ReadFile(absBundle)
 				if err != nil {
 					return fmt.Errorf("read bundle: %w", err)
@@ -168,7 +168,7 @@ func serveCmd() *cobra.Command {
 				if _, err := os.Stat(absEntry); os.IsNotExist(err) {
 					return fmt.Errorf("entry not found: %s\n(run `astro build` first)", absEntry)
 				}
-				log.Printf("Bundling %s ...", absEntry)
+				slog.InfoContext(ctx, "bundling entry", "path", absEntry)
 				jsCode, err = astroruntime.BundleSSR(absEntry)
 				if err != nil {
 					return fmt.Errorf("bundle: %w", err)
@@ -186,10 +186,9 @@ func serveCmd() *cobra.Command {
 			}
 			defer rt.Close()
 
-			log.Printf("QJS pool ready")
-			log.Printf("Netlify SSR mock running at http://localhost%s", addr)
-			log.Printf("  dist: %s", absDist)
-			return serveWithShutdown(rt, addr)
+			slog.InfoContext(ctx, "QJS pool ready")
+			slog.InfoContext(ctx, "server listening", "addr", "http://localhost"+addr, "dist", absDist)
+			return serveWithShutdown(ctx, rt, addr)
 		},
 	}
 
@@ -198,7 +197,6 @@ func serveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&bundle, "bundle", "", "path to pre-bundled .mjs")
 	cmd.Flags().IntVar(&port, "port", 8888, "port to listen on")
 	cmd.Flags().StringVar(&distDir, "dist", "dist", "static output directory (not used with --pack)")
-	cmd.Flags().BoolVar(&traceFlag, "trace", false, "print per-request span timing to stderr")
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", defaultCacheDir(), "bundle bytecode cache directory (empty to disable)")
 
 	cmd.MarkFlagsMutuallyExclusive("pack", "entry", "bundle")
@@ -207,7 +205,7 @@ func serveCmd() *cobra.Command {
 }
 
 // serveFromPack loads a .pack file and starts the server via the Runtime SDK.
-func serveFromPack(packPath, addr, cacheDir string) error {
+func serveFromPack(ctx context.Context, packPath, addr, cacheDir string) error {
 	absPackPath, err := filepath.Abs(packPath)
 	if err != nil {
 		return fmt.Errorf("resolve --pack: %w", err)
@@ -226,25 +224,24 @@ func serveFromPack(packPath, addr, cacheDir string) error {
 	}
 	defer rt.Close()
 
-	log.Printf("QJS pool ready")
-	log.Printf("Netlify SSR mock running at http://localhost%s", addr)
-	log.Printf("  pack: %s", absPackPath)
-	return serveWithShutdown(rt, addr)
+	slog.InfoContext(ctx, "QJS pool ready")
+	slog.InfoContext(ctx, "server listening", "addr", "http://localhost"+addr, "pack", absPackPath)
+	return serveWithShutdown(ctx, rt, addr)
 }
 
 // serveWithShutdown runs rt.ListenAndServe and gracefully shuts down on SIGTERM/SIGINT.
-func serveWithShutdown(rt *astroruntime.Runtime, addr string) error {
+func serveWithShutdown(ctx context.Context, rt *astroruntime.Runtime, addr string) error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(quit)
 
 	go func() {
 		<-quit
-		log.Printf("shutting down ...")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		slog.InfoContext(ctx, "shutting down")
+		shutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		if err := rt.Shutdown(ctx); err != nil {
-			log.Printf("shutdown: %v", err)
+		if err := rt.Shutdown(shutCtx); err != nil {
+			slog.ErrorContext(shutCtx, "shutdown error", "err", err)
 		}
 	}()
 

@@ -1,0 +1,7 @@
+FROM node:24-alpine
+WORKDIR /app
+COPY benchmark/node_server.mjs .
+EXPOSE 3001
+HEALTHCHECK --interval=3s --timeout=5s --retries=15 --start-period=15s \
+  CMD node -e "const h=require('node:http');h.get('http://localhost:3001/api/products',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+CMD ["node", "node_server.mjs", "--port", "3001", "--entry", "/data/.netlify/build/entry.mjs"]

@@ -1,0 +1,38 @@
+services:
+  astro-runtime:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "18081:8080"
+    volumes:
+      - ./integration/testdata/example/example.pack:/data/bundle.pack:ro
+      - bench-astro-cache:/cache
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/products >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  node-ssr:
+    build:
+      context: .
+      dockerfile: benchmark/Dockerfile.node
+    ports:
+      - "18082:3001"
+    volumes:
+      - ./examples/example:/data:ro
+    healthcheck:
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "const h=require('node:http');h.get('http://localhost:3001/api/products',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 3s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+
+volumes:
+  bench-astro-cache:

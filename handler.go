@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -14,6 +14,51 @@ import (
 	"github.com/dxkite/astro-runtime/trace"
 	"github.com/dxkite/qjs"
 )
+
+// spanLog is an internal RequestTrace that accumulates per-request timing for the ssr spans log.
+// Fields written by the main goroutine (poolGet, jsEval, response) are safe-before fields written
+// by the worker goroutine (jsTail) due to the tailCh channel happens-before guarantee.
+type spanLog struct {
+	evalStart time.Time
+	poolGet   time.Duration
+	jsEval    time.Duration // evalStart → GotFirstResponseByte
+	response  time.Duration
+	jsTail    time.Duration
+	rt        *trace.RequestTrace
+}
+
+type spanLogEntry struct {
+	Name string `json:"name"`
+	Ms   int64  `json:"ms"`
+}
+
+func newSpanLog() *spanLog {
+	sl := &spanLog{}
+	sl.rt = &trace.RequestTrace{
+		PoolGetDone:          func(start, end time.Time) { sl.poolGet = end.Sub(start) },
+		GotFirstResponseByte: func() { sl.jsEval = time.Since(sl.evalStart) },
+		ResponseDone:         func(start, end time.Time) { sl.response = end.Sub(start) },
+		JSTailDone:           func(start, end time.Time) { sl.jsTail = end.Sub(start) },
+	}
+	return sl
+}
+
+// serverTimingEntry formats one Server-Timing metric as "name;dur=X.XXX".
+func serverTimingEntry(name string, d time.Duration) string {
+	return fmt.Sprintf("%s;dur=%.3f", name, float64(d.Nanoseconds())/1e6)
+}
+
+func (sl *spanLog) log(ctx context.Context) {
+	entries := []spanLogEntry{
+		{"pool.get", sl.poolGet.Milliseconds()},
+		{"js.eval", sl.jsEval.Milliseconds()},
+		{"response.write", sl.response.Milliseconds()},
+	}
+	if sl.jsTail > 0 {
+		entries = append(entries, spanLogEntry{"js.tail", sl.jsTail.Milliseconds()})
+	}
+	rtlog.DebugContext(ctx, "ssr spans", "spans", entries)
+}
 
 // responseInfo carries response timing from the main goroutine to the worker goroutine
 // after sigDone is received, enabling accurate js.tail measurement.
@@ -25,12 +70,14 @@ type responseInfo struct {
 // RequestContext holds per-request state for a single SSR invocation.
 // Obtain via Pool.RequestContext; it is automatically released after HandleRequest returns.
 type RequestContext struct {
-	pool   *Pool
-	prt    *pooledRuntime
-	goCtx  context.Context
-	w      http.ResponseWriter
-	r      *http.Request
-	tailCh chan responseInfo // buffer=1; worker blocks here until main confirms response timing
+	pool      *Pool
+	prt       *pooledRuntime
+	goCtx     context.Context
+	w         http.ResponseWriter
+	r         *http.Request
+	tailCh    chan responseInfo // buffer=1; worker blocks here until main confirms response timing
+	requestAt time.Time        // when this request entered the handler, for latency calculation
+	spanLog   *spanLog         // internal timing collector for ssr spans log
 }
 
 func (rc *RequestContext) release() { rc.pool.Put(rc.prt) }
@@ -39,25 +86,38 @@ func (rc *RequestContext) release() { rc.pool.Put(rc.prt) }
 // The caller MUST pass the returned *RequestContext to HandleRequest, which releases the runtime.
 // Returns an error only if the pool is exhausted and cannot create a new runtime.
 func (p *Pool) RequestContext(w http.ResponseWriter, r *http.Request) (*RequestContext, error) {
-	goCtx := trace.NewContext(r.Context())
-	sp := trace.Start(goCtx, "pool.get")
-	prt, err := p.Get()
-	sp.Stop()
+	now := time.Now()
+	sl := newSpanLog()
+	goCtx := trace.WithRequestTrace(r.Context(), sl.rt)
+	goCtx = withRequestAttrs(goCtx,
+		slog.String("method", r.Method),
+		slog.String("path", r.URL.Path),
+		slog.String("client_ip", clientIP(r)),
+		slog.String("user_agent", r.Header.Get("User-Agent")),
+	)
+	poolGetStart := time.Now()
+	prt, err := p.Get(goCtx)
+	poolGetEnd := time.Now()
+	if rt := trace.ContextRequestTrace(goCtx); rt != nil && rt.PoolGetDone != nil {
+		rt.PoolGetDone(poolGetStart, poolGetEnd)
+	}
 	if err != nil {
 		return nil, err
 	}
 	return &RequestContext{
-		pool:   p,
-		prt:    prt,
-		goCtx:  goCtx,
-		w:      w,
-		r:      r,
-		tailCh: make(chan responseInfo, 1),
+		pool:      p,
+		prt:       prt,
+		goCtx:     goCtx,
+		w:         w,
+		r:         r,
+		tailCh:    make(chan responseInfo, 1),
+		requestAt: now,
+		spanLog:   sl,
 	}, nil
 }
 
 // NetlifyContext is the per-request context object passed to the JS SSR handler.
-// Fields left zero-valued fall back to mock defaults in glue.js.
+// Fields left zero-valued fall back to mock defaults in bootstrap.mjs.
 type NetlifyContext struct {
 	IP        string          `json:"ip,omitempty"`
 	RequestID string          `json:"requestId,omitempty"`
@@ -193,17 +253,26 @@ func HandleRequest(rc *RequestContext) {
 	ctx := prt.rt.Context()
 	code := "await __handleRequest(" + string(payloadJSON) + ")"
 
-	sp := trace.Start(goCtx, "js.eval")
-
 	// Allocate a fresh streaming channel for this request.
 	// Buffer=8 allows JS to run a few chunks ahead without blocking on slow clients.
 	prt.streamCh = make(chan ResponseSignal, 8)
+	// Inject the per-request context into the QJS context so host function callbacks
+	// (SetGoFunc/SetGoAsyncFunc receive *qjs.Context as context.Context) can access
+	// per-request log attrs and cancellation signals via ctx.Value / ctx.Done.
+	prt.rt.Context().Context = goCtx
 	ch := prt.streamCh // capture local reference
+
+	rc.spanLog.evalStart = time.Now()
 
 	// Dispatch Eval to the worker pool. The worker owns the runtime exclusively until
 	// rc.release() is called. Falls back to a temporary goroutine if all workers are busy.
-	rc.pool.submit(func() {
+	rc.pool.submit(goCtx, func() {
+		evalStart := rc.spanLog.evalStart
 		resultVal, evalErr := ctx.Eval("handle-request.js", qjs.Code(code), qjs.FlagAsync())
+		evalEnd := time.Now()
+		if rt := trace.ContextRequestTrace(rc.goCtx); rt != nil && rt.GoCallDone != nil {
+			rt.GoCallDone(evalStart, evalEnd, evalErr)
+		}
 
 		if resultVal != nil {
 			resultVal.Free()
@@ -222,19 +291,26 @@ func HandleRequest(rc *RequestContext) {
 		close(ch)            // unblock main's drain loops before blocking on tailCh
 		info := <-rc.tailCh // wait for main to deliver response timing
 
-		if !info.doneAt.IsZero() {
-			if tail := runtimeDoneAt.Sub(info.doneAt); tail > 0 {
-				sp := trace.StartAt(rc.goCtx, "js.tail", info.doneAt)
-				sp.StopAt(runtimeDoneAt)
+		if !info.doneAt.IsZero() && runtimeDoneAt.After(info.doneAt) {
+			if rt := trace.ContextRequestTrace(rc.goCtx); rt != nil && rt.JSTailDone != nil {
+				rt.JSTailDone(info.doneAt, runtimeDoneAt)
 			}
 		}
-		trace.Print(rc.goCtx, r.Method, r.URL.Path, info.status)
+
+		latency := runtimeDoneAt.Sub(rc.requestAt).Seconds()
+		if !info.doneAt.IsZero() {
+			latency = info.doneAt.Sub(rc.requestAt).Seconds()
+		}
+		rtlog.InfoContext(rc.goCtx, "ssr request",
+			"status", info.status,
+			"latency", latency,
+		)
+		rc.spanLog.log(rc.goCtx)
 		rc.release()
 	})
 
 	// Wait for the header signal (JS has response status and headers ready).
 	sig, ok := <-ch
-	sp.StopAt(sig.BodyTime)
 	if !ok || sig.Kind == sigError || sig.Err != nil {
 		err := sig.Err
 		if !ok {
@@ -254,10 +330,19 @@ func HandleRequest(rc *RequestContext) {
 		w.Header().Add(kv[0], kv[1])
 	}
 	savedStatus := sig.Meta.Status
+	// Fire GotFirstResponseByte before WriteHeader so sl.jsEval is set when we build Server-Timing.
+	if rt := trace.ContextRequestTrace(goCtx); rt != nil && rt.GotFirstResponseByte != nil {
+		rt.GotFirstResponseByte()
+	}
+	sl := rc.spanLog
+	w.Header().Set("Server-Timing", strings.Join([]string{
+		serverTimingEntry("pool-get", sl.poolGet),
+		serverTimingEntry("js-eval", sl.jsEval),
+	}, ", "))
 	w.WriteHeader(savedStatus)
 	flusher, canFlush := w.(http.Flusher)
 
-	sp2 := trace.Start(goCtx, "response.write")
+	responseStart := time.Now()
 	for sig = range ch {
 		switch sig.Kind {
 		case sigChunk:
@@ -266,22 +351,34 @@ func HandleRequest(rc *RequestContext) {
 				flusher.Flush()
 			}
 		case sigDone:
-			trace.SetJSCheckpoints(goCtx, sig.JSCheckpoints)
-			sp2.Stop()
 			doneAt := time.Now()
+			if rt := trace.ContextRequestTrace(goCtx); rt != nil {
+				if rt.ResponseDone != nil {
+					rt.ResponseDone(responseStart, doneAt)
+				}
+				if rt.JSCheckpointsDone != nil {
+					for _, cp := range sig.JSCheckpoints {
+						rt.JSCheckpointsDone(cp.Name, cp.Start, cp.End)
+					}
+				}
+			}
+			// Trailer: response.write + JS checkpoints (all known now that ResponseDone fired).
+			trailerParts := []string{serverTimingEntry("response-write", sl.response)}
+			for _, cp := range sig.JSCheckpoints {
+				trailerParts = append(trailerParts, serverTimingEntry(cp.Name, cp.End.Sub(cp.Start)))
+			}
+			w.Header().Set(http.TrailerPrefix+"Server-Timing", strings.Join(trailerParts, ", "))
 			for range ch {}
 			rc.tailCh <- responseInfo{doneAt: doneAt, status: savedStatus}
 			return
 		case sigError:
-			log.Printf("mid-stream JS error: %v", sig.Err)
-			sp2.Stop()
+			rtlog.ErrorContext(goCtx, "mid-stream JS error", "err", sig.Err)
 			for range ch {}
 			rc.tailCh <- responseInfo{}
 			return
 		}
 	}
 	// Channel closed without sigDone (e.g., JS threw mid-stream without endStream).
-	sp2.Stop()
 	rc.tailCh <- responseInfo{}
 }
 

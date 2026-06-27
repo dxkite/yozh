@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,7 +60,7 @@ func extractPackToCache(data []byte, cacheDir string) (bundleBC []byte, distFS f
 	distPath := filepath.Join(dir, "dist")
 
 	if _, err := os.Stat(bcPath); err == nil {
-		log.Printf("pack cache hit: %s", dir)
+		rtlog.Info("pack cache hit", "dir", dir)
 		bc, err := os.ReadFile(bcPath)
 		if err != nil {
 			return nil, nil, err
@@ -69,7 +68,7 @@ func extractPackToCache(data []byte, cacheDir string) (bundleBC []byte, distFS f
 		return bc, os.DirFS(distPath), nil
 	}
 
-	log.Printf("pack cache miss — extracting to %s ...", dir)
+	rtlog.Info("pack cache miss", "dir", dir)
 	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, nil, fmt.Errorf("open zip: %w", err)

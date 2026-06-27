@@ -15,7 +15,7 @@ var fetchClient = &http.Client{Timeout: 30 * time.Second}
 
 // goFetch performs a real HTTP request from Go and returns the response as JSON.
 // Called by the __go_fetchRaw host function registered in runtime.go.
-func goFetch(urlStr, method, headersJSON, body string) (string, error) {
+func goFetch(urlStr, method, headersJSON, body string) (string, int, error) {
 	var bodyReader io.Reader
 	if body != "" {
 		bodyReader = strings.NewReader(body)
@@ -23,7 +23,7 @@ func goFetch(urlStr, method, headersJSON, body string) (string, error) {
 
 	req, err := http.NewRequest(method, urlStr, bodyReader)
 	if err != nil {
-		return "", fmt.Errorf("fetch: create request: %w", err)
+		return "", 0, fmt.Errorf("fetch: create request: %w", err)
 	}
 
 	var headers map[string]string
@@ -35,13 +35,13 @@ func goFetch(urlStr, method, headersJSON, body string) (string, error) {
 
 	resp, err := fetchClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("fetch: %w", err)
+		return "", 0, fmt.Errorf("fetch: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
-		return "", fmt.Errorf("fetch: read body: %w", err)
+		return "", 0, fmt.Errorf("fetch: read body: %w", err)
 	}
 
 	respHeaders := make([][2]string, 0, len(resp.Header))
@@ -56,5 +56,5 @@ func goFetch(urlStr, method, headersJSON, body string) (string, error) {
 		"headers": respHeaders,
 		"body":    string(respBody),
 	})
-	return string(result), nil
+	return string(result), resp.StatusCode, nil
 }

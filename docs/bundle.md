@@ -98,7 +98,7 @@ QJS 运行时没有 Node.js 内置模块（`fs`、`path`、`crypto` 等）。
 ^(node:|process$|fs$|fs/|path$|path/|url$|crypto$|buffer$|stream$|
   http$|https$|http2$|os$|async_hooks$|worker_threads$|perf_hooks$|
   events$|util$|assert$|net$|tls$|tty$|zlib$|child_process$|dns$|
-  dgram$|readline$)
+  dgram$|readline$|module$)
 ```
 
 匹配 `node:` 协议前缀以及所有已知裸 Node.js 内置名称。第三方包名不匹配此正则，
@@ -123,6 +123,7 @@ shim 源码位于 `js/shims/`，通过 `//go:embed js/shims` 编译进 Go 二进
 | `node:fs` / `fs` / `node:fs/promises` | `node-fs.js` | `promises`（stub）、`existsSync`（→ `false`）|
 | `node:http2` / `http2` | `node-http2.js` | `createServer`（stub）|
 | `node:tty` / `tty` | `node-tty.js` | `isatty`（→ `false`）|
+| `node:module` / `module` | `node-module.js` | `createRequire`（stub）|
 | 其他 `node:*` | —— | `export default {}` |
 
 **未匹配的 Node.js 内置**（如 `node:http`、`node:os`、`node:zlib`）返回空 stub `export default {}`。
@@ -159,11 +160,11 @@ shim 源码位于 `js/shims/`，通过 `//go:embed js/shims` 编译进 Go 二进
 |---|---|---|
 | `Polyfills` | `[]{ Name, BC }` | Web API polyfill 的 QJS bytecode（按初始化顺序排列） |
 | `Bundle` | `[]byte` | SSR bundle 的 QJS bytecode（module 模式编译） |
-| `Glue` | `[]byte` | 请求适配层（glue.js）的 QJS bytecode |
+| `Bootstrap` | `[]byte` | 请求适配层（bootstrap.mjs）的 QJS bytecode |
 | `Version` | `uint32`（当前为 `1`） | 格式版本，不匹配时拒绝加载 |
 
 文件体积约为对应 `.mjs` 的 2–3 倍（12 MB JS → 31 MB .jsbc），
-因为 .jsbc 额外包含所有 polyfill 和 glue 的 bytecode。
+因为 .jsbc 额外包含所有 polyfill 和 bootstrap 的 bytecode。
 
 ### 命令行用法
 
@@ -367,5 +368,5 @@ CMD ["/app/server", "--bytecodes", "/app/.netlify/build/bundle.jsbc", "--dist", 
 | `node:http` / `node:https` 返回空 stub | Netlify 适配器不在渲染路径中使用，暂不影响正常功能 |
 | esbuild 版本需与 node_modules 兼容 | 预打包脚本使用 node_modules 中已安装的 esbuild（由 astro/vite 引入），无需单独安装 |
 | bundle 体积约 12–13 MB | 包含所有依赖的内联代码；QJS bytecode 编译后常驻内存，不影响请求延迟 |
-| `.jsbc` 体积约 30–32 MB | 比 `.mjs` 大 2–3 倍，因为包含了 polyfill 和 glue 的 bytecode；仅在启动时读取一次 |
+| `.jsbc` 体积约 30–32 MB | 比 `.mjs` 大 2–3 倍，因为包含了 polyfill 和 bootstrap 的 bytecode；仅在启动时读取一次 |
 | `.jsbc` 格式版本绑定 | `Version = 1`，Go 二进制升级后（polyfill 变化）需重新运行 `bundle-ssr-bin` 生成新文件 |

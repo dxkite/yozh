@@ -18,7 +18,7 @@ func CompileBundleBytecode(bundleSrc []byte) ([]byte, error) {
 		return nil, fmt.Errorf("qjs runtime: %w", err)
 	}
 	defer rt.Close()
-	bc, err := rt.Context().Compile("ssr.mjs", qjs.Code(string(bundleSrc)), qjs.TypeModule())
+	bc, err := rt.Context().Compile("entry.mjs", qjs.Code(string(bundleSrc)), qjs.TypeModule())
 	if err != nil {
 		return nil, fmt.Errorf("compile bundle: %w", err)
 	}
@@ -49,10 +49,13 @@ type polyfillEntry struct {
 
 // bytecodeSet holds pre-compiled QuickJS bytecodes for a pool's lifetime.
 // All pool workers share the same bytecodeSet (read-only after creation).
+//
+// bootstrap.mjs is NOT pre-compiled here: it imports from entry.mjs, which is
+// only registered in the module cache after the bundle is eval'd at runtime.
+// It is compiled per-context inside setupRuntime, after entry.mjs is eval'd.
 type bytecodeSet struct {
 	polyfills []polyfillEntry
 	bundle    []byte
-	glue      []byte
 }
 
 // compileBytecodes compiles polyfills, the ESM bundle, and the glue adapter to
@@ -84,15 +87,10 @@ func compileBytecodes(ctx *qjs.Context, bundleSrc []byte, precompiledBundle []by
 	if precompiledBundle != nil {
 		bcs.bundle = precompiledBundle
 	} else {
-		bcs.bundle, err = ctx.Compile("ssr.mjs", qjs.Code(string(bundleSrc)), qjs.TypeModule())
+		bcs.bundle, err = ctx.Compile("entry.mjs", qjs.Code(string(bundleSrc)), qjs.TypeModule())
 		if err != nil {
 			return nil, fmt.Errorf("compile bundle: %w", err)
 		}
-	}
-
-	bcs.glue, err = ctx.Compile("glue.js", qjs.Code(glueJS))
-	if err != nil {
-		return nil, fmt.Errorf("compile glue: %w", err)
 	}
 
 	return bcs, nil

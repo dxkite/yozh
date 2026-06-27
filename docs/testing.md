@@ -16,8 +16,9 @@
 
 ```
 integration/
-├── integration_test.go       # SSR + polyfill + BFF + pack 集成测试（48 个）
+├── integration_test.go       # SSR + polyfill + BFF + pack 集成测试（45 个）
 ├── images_test.go            # 图像 CDN 测试（11 个）
+├── bench_http_test.go        # HTTP 端到端 benchmark（6 个 Benchmark）
 └── testdata/
     └── example/
         ├── bundle.mjs        # 预打包 ESM（从 examples/example 生成）
@@ -522,7 +523,8 @@ TestSetAsyncFuncTiming
 | Pack Runtime 冒烟（NewRuntime from pack，ServeHTTP） | 3 | ✅ |
 | 图像 CDN（public/Astro asset/pack FS/绝对 URL/格式/缩放） | 11 | ✅ |
 | 并发 async（SetGoAsyncFunc 单元） | 3 | ✅ |
-| **合计** | **51** | **全部通过** |
+| HTTP Benchmark（AstroRuntime vs Node.js，6 个 Benchmark 函数） | — | ✅ |
+| **合计（Test 函数）** | **59** | **全部通过** |
 
 ---
 
