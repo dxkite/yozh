@@ -112,7 +112,7 @@ func defaultCacheDir() string {
 
 func serveCmd() *cobra.Command {
 	var packPath, entry, bundle, distDir, cacheDir string
-	var port int
+	var port, packCacheSize int
 
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -138,7 +138,7 @@ func serveCmd() *cobra.Command {
 			addr := fmt.Sprintf(":%d", port)
 
 			if packPath != "" {
-				return serveFromPack(ctx, packPath, addr, cacheDir)
+				return serveFromPack(ctx, packPath, addr, cacheDir, packCacheSize)
 			}
 
 			absDist, err := filepath.Abs(distDir)
@@ -198,6 +198,7 @@ func serveCmd() *cobra.Command {
 	cmd.Flags().IntVar(&port, "port", 8888, "port to listen on")
 	cmd.Flags().StringVar(&distDir, "dist", "dist", "static output directory (not used with --pack)")
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", defaultCacheDir(), "bundle bytecode cache directory (empty to disable)")
+	cmd.Flags().IntVar(&packCacheSize, "pack-cache-size", 0, "max extracted pack caches to keep (0 = default 3, negative = unlimited)")
 
 	cmd.MarkFlagsMutuallyExclusive("pack", "entry", "bundle")
 
@@ -205,7 +206,7 @@ func serveCmd() *cobra.Command {
 }
 
 // serveFromPack loads a .pack file and starts the server via the Runtime SDK.
-func serveFromPack(ctx context.Context, packPath, addr, cacheDir string) error {
+func serveFromPack(ctx context.Context, packPath, addr, cacheDir string, packCacheSize int) error {
 	absPackPath, err := filepath.Abs(packPath)
 	if err != nil {
 		return fmt.Errorf("resolve --pack: %w", err)
@@ -217,6 +218,7 @@ func serveFromPack(ctx context.Context, packPath, addr, cacheDir string) error {
 	rt, err := astroruntime.NewRuntime(
 		astroruntime.WithPackFile(absPackPath),
 		astroruntime.WithCacheDir(cacheDir),
+		astroruntime.WithPackCacheSize(packCacheSize),
 		astroruntime.WithPoolOptions(astroruntime.WithEnv(envMap())),
 	)
 	if err != nil {

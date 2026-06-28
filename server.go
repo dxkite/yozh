@@ -40,6 +40,8 @@ type runtimeConfig struct {
 	distDir  string // WithDistDir (converted to distFS on build)
 	cacheDir string // WithCacheDir
 
+	packCacheMaxSize int // WithPackCacheSize; 0 = default (3), negative = unlimited
+
 	poolOpts []PoolOption // WithPoolOptions
 }
 
@@ -85,6 +87,20 @@ func WithDistDir(path string) RuntimeOption {
 // For bundle sources: compiled QJS bytecodes cached as cacheDir/<hash>.bc.
 func WithCacheDir(dir string) RuntimeOption {
 	return func(c *runtimeConfig) { c.cacheDir = dir }
+}
+
+// WithPackCacheSize sets the maximum number of extracted pack cache directories to
+// keep in cacheDir. When a new pack is extracted, the oldest directories (by
+// modification time) are removed to stay within the limit. Defaults to 3.
+// Pass 0 for unlimited (no eviction).
+func WithPackCacheSize(n int) RuntimeOption {
+	return func(c *runtimeConfig) {
+		if n <= 0 {
+			c.packCacheMaxSize = -1 // unlimited
+		} else {
+			c.packCacheMaxSize = n
+		}
+	}
 }
 
 // WithPoolOptions passes PoolOption values (WithEnv, WithSize, etc.) to the
@@ -133,6 +149,12 @@ func NewRuntime(opts ...RuntimeOption) (*Runtime, error) {
 		cfg.distFS = os.DirFS(cfg.distDir)
 	}
 
+	// Resolve effective pack cache size: 0 (unset) → 3 default; -1 → unlimited.
+	packCacheMaxSize := cfg.packCacheMaxSize
+	if packCacheMaxSize == 0 {
+		packCacheMaxSize = 3
+	}
+
 	var (
 		bundleBC []byte
 		distFS   fs.FS
@@ -142,7 +164,7 @@ func NewRuntime(opts ...RuntimeOption) (*Runtime, error) {
 	switch {
 	case len(cfg.packData) > 0:
 		if cfg.cacheDir != "" {
-			bundleBC, distFS, err = extractPackToCache(cfg.packData, cfg.cacheDir)
+			bundleBC, distFS, err = extractPackToCache(cfg.packData, cfg.cacheDir, packCacheMaxSize)
 		} else {
 			bundleBC, distFS, err = openPackInMemory(cfg.packData)
 		}
@@ -151,7 +173,7 @@ func NewRuntime(opts ...RuntimeOption) (*Runtime, error) {
 		}
 
 	case cfg.packPath != "":
-		bundleBC, distFS, err = openPackFile(cfg.packPath, cfg.cacheDir)
+		bundleBC, distFS, err = openPackFile(cfg.packPath, cfg.cacheDir, packCacheMaxSize)
 		if err != nil {
 			return nil, err
 		}

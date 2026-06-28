@@ -5,12 +5,16 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 // loadPackData reads pack bytes from an io.Reader (reads everything into memory).
@@ -38,8 +42,9 @@ func openPackInMemory(data []byte) (bundleBC []byte, distFS fs.FS, err error) {
 
 // openPackFile reads a .pack from disk. With a non-empty cacheDir it extracts to
 // cacheDir/<sha256(data)>/ once and reuses the directory on subsequent calls.
-// Without cacheDir it falls back to openPackInMemory.
-func openPackFile(path, cacheDir string) (bundleBC []byte, distFS fs.FS, err error) {
+// Without cacheDir it falls back to openPackInMemory. maxSize controls how many
+// extracted caches are retained (0 or negative = unlimited).
+func openPackFile(path, cacheDir string, maxSize int) (bundleBC []byte, distFS fs.FS, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read pack %s: %w", path, err)
@@ -47,12 +52,44 @@ func openPackFile(path, cacheDir string) (bundleBC []byte, distFS fs.FS, err err
 	if cacheDir == "" {
 		return openPackInMemory(data)
 	}
-	return extractPackToCache(data, cacheDir)
+	return extractPackToCache(data, cacheDir, maxSize)
+}
+
+// packCacheMetaMu guards reads and writes to metadata.json within a process.
+var packCacheMetaMu sync.Mutex
+
+// packCacheMeta is the in-memory representation of cacheDir/metadata.json.
+// Entries maps each cache key to its last-access time (Unix nanoseconds).
+type packCacheMeta struct {
+	Entries map[string]int64 `json:"entries"`
+}
+
+func readPackCacheMeta(cacheDir string) packCacheMeta {
+	meta := packCacheMeta{Entries: make(map[string]int64)}
+	data, err := os.ReadFile(filepath.Join(cacheDir, "metadata.json"))
+	if err != nil {
+		return meta
+	}
+	if err := json.Unmarshal(data, &meta); err != nil || meta.Entries == nil {
+		meta.Entries = make(map[string]int64)
+	}
+	return meta
+}
+
+func writePackCacheMeta(cacheDir string, meta packCacheMeta) {
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(cacheDir, "metadata.json"), data, 0644)
 }
 
 // extractPackToCache extracts a pack to cacheDir/<sha256>/ and returns bundleBC
-// and a distFS backed by the extracted directory. Cache hit skips extraction.
-func extractPackToCache(data []byte, cacheDir string) (bundleBC []byte, distFS fs.FS, err error) {
+// and a distFS backed by the extracted directory. Cache hit skips extraction and
+// updates metadata.json for LRU tracking. maxSize limits how many extracted cache
+// directories are kept; oldest by recorded access time are removed when the limit
+// is exceeded. maxSize <= 0 means unlimited.
+func extractPackToCache(data []byte, cacheDir string, maxSize int) (bundleBC []byte, distFS fs.FS, err error) {
 	sum := sha256.Sum256(data)
 	key := hex.EncodeToString(sum[:])
 	dir := filepath.Join(cacheDir, key)
@@ -61,6 +98,11 @@ func extractPackToCache(data []byte, cacheDir string) (bundleBC []byte, distFS f
 
 	if _, err := os.Stat(bcPath); err == nil {
 		rtlog.Info("pack cache hit", "dir", dir)
+		packCacheMetaMu.Lock()
+		meta := readPackCacheMeta(cacheDir)
+		meta.Entries[key] = time.Now().UnixNano()
+		writePackCacheMeta(cacheDir, meta)
+		packCacheMetaMu.Unlock()
 		bc, err := os.ReadFile(bcPath)
 		if err != nil {
 			return nil, nil, err
@@ -80,7 +122,59 @@ func extractPackToCache(data []byte, cacheDir string) (bundleBC []byte, distFS f
 	if err != nil {
 		return nil, nil, err
 	}
+	evictPackCache(cacheDir, key, maxSize)
 	return bc, os.DirFS(distPath), nil
+}
+
+// evictPackCache registers currentKey in metadata.json with the current timestamp,
+// then removes the oldest entries (by recorded access time) until at most maxSize
+// directories remain. currentKey is never removed. maxSize <= 0 is a no-op.
+func evictPackCache(cacheDir, currentKey string, maxSize int) {
+	packCacheMetaMu.Lock()
+	defer packCacheMetaMu.Unlock()
+
+	meta := readPackCacheMeta(cacheDir)
+	meta.Entries[currentKey] = time.Now().UnixNano()
+
+	// Drop metadata entries whose directories no longer exist.
+	for k := range meta.Entries {
+		if _, err := os.Stat(filepath.Join(cacheDir, k)); os.IsNotExist(err) {
+			delete(meta.Entries, k)
+		}
+	}
+
+	if maxSize <= 0 || len(meta.Entries) <= maxSize {
+		writePackCacheMeta(cacheDir, meta)
+		return
+	}
+
+	type entry struct {
+		key string
+		ts  int64
+	}
+	entries := make([]entry, 0, len(meta.Entries))
+	for k, ts := range meta.Entries {
+		entries = append(entries, entry{k, ts})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ts < entries[j].ts })
+
+	toRemove := len(entries) - maxSize
+	removed := 0
+	for i := 0; removed < toRemove && i < len(entries); i++ {
+		if entries[i].key == currentKey {
+			continue
+		}
+		p := filepath.Join(cacheDir, entries[i].key)
+		rtlog.Info("evicting pack cache", "dir", p)
+		if err := os.RemoveAll(p); err != nil {
+			rtlog.Warn("evict pack cache failed", "dir", p, "err", err)
+		} else {
+			delete(meta.Entries, entries[i].key)
+			removed++
+		}
+	}
+
+	writePackCacheMeta(cacheDir, meta)
 }
 
 // extractZip extracts all entries of r into destDir with path-traversal guard.
