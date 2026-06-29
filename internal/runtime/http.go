@@ -1,4 +1,4 @@
-package astroruntime
+package jsruntime
 
 import (
 	"encoding/json"
@@ -9,12 +9,9 @@ import (
 	"time"
 )
 
-// fetchClient is a shared HTTP client used by both the JS fetch() polyfill and
-// the image CDN handler. A 30-second timeout prevents goroutine leaks on hung upstreams.
 var fetchClient = &http.Client{Timeout: 30 * time.Second}
 
 // goFetch performs a real HTTP request from Go and returns the response as JSON.
-// Called by the __go_fetchRaw host function registered in runtime.go.
 func goFetch(urlStr, method, headersJSON, body string) (string, int, error) {
 	var bodyReader io.Reader
 	if body != "" {

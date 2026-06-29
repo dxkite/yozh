@@ -156,30 +156,29 @@ func NewRuntime(opts ...RuntimeOption) (*Runtime, error) {
 	}
 
 	var (
-		bundleBC []byte
-		distFS   fs.FS
-		err      error
+		pc  *packContents
+		err error
 	)
 
 	switch {
 	case len(cfg.packData) > 0:
 		if cfg.cacheDir != "" {
-			bundleBC, distFS, err = extractPackToCache(cfg.packData, cfg.cacheDir, packCacheMaxSize)
+			pc, err = extractPackToCache(cfg.packData, cfg.cacheDir, packCacheMaxSize)
 		} else {
-			bundleBC, distFS, err = openPackInMemory(cfg.packData)
+			pc, err = openPackContentsInMemory(cfg.packData)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("open pack: %w", err)
 		}
 
 	case cfg.packPath != "":
-		bundleBC, distFS, err = openPackFile(cfg.packPath, cfg.cacheDir, packCacheMaxSize)
+		pc, err = openPackFile(cfg.packPath, cfg.cacheDir, packCacheMaxSize)
 		if err != nil {
 			return nil, err
 		}
 
 	case len(cfg.bundle) > 0:
-		distFS = cfg.distFS // may be nil
+		distFS := cfg.distFS // may be nil
 		poolOpts := cfg.poolOpts
 		if cfg.cacheDir != "" {
 			poolOpts = append(poolOpts, WithBundleCache(cfg.cacheDir))
@@ -192,11 +191,19 @@ func NewRuntime(opts ...RuntimeOption) (*Runtime, error) {
 	}
 
 	// Pack path: distFS overrides pack-embedded FS if caller provided one.
+	distFS := pc.distFS
 	if cfg.distFS != nil {
 		distFS = cfg.distFS
 	}
 
-	poolOpts := append([]PoolOption{WithPrecompiledBundle(bundleBC)}, cfg.poolOpts...)
+	// Infer default engine from pack content; user-supplied opts can override.
+	var packOpts []PoolOption
+	if len(pc.bundleBC) > 0 {
+		packOpts = append(packOpts, WithPrecompiledBundle(pc.bundleBC), WithEngineKind(EngineQJS))
+	} else if len(pc.gojaCode) > 0 {
+		packOpts = append(packOpts, WithGojaBundle(pc.gojaCode), WithEngineKind(EngineGoja))
+	}
+	poolOpts := append(packOpts, cfg.poolOpts...) // user opts override the above
 	pool, err := NewPool(nil, poolOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("pool init: %w", err)

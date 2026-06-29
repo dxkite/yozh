@@ -1,5 +1,5 @@
 services:
-  astro-runtime:
+  astro-runtime-qjs:
     build:
       context: .
       dockerfile: Dockerfile
@@ -7,9 +7,26 @@ services:
       - "18081:8080"
     volumes:
       - ./integration/testdata/example/example.pack:/data/bundle.pack:ro
-      - bench-astro-cache:/cache
+      - bench-astro-qjs-cache:/cache
+    command: ["serve", "--pack", "/data/bundle.pack", "--port", "8080", "--cache-dir", "/cache", "--engine", "qjs"]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/products >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  astro-runtime-goja:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "18083:8080"
+    volumes:
+      - ./integration/testdata/example/example.pack:/data/bundle.pack:ro
+    command: ["serve", "--pack", "/data/bundle.pack", "--port", "8080", "--engine", "goja"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ >/dev/null 2>&1"]
       interval: 3s
       timeout: 5s
       retries: 15
@@ -28,11 +45,11 @@ services:
         - "CMD"
         - "node"
         - "-e"
-        - "const h=require('node:http');h.get('http://localhost:3001/api/products',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+        - "const h=require('node:http');h.get('http://localhost:3001/',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
       interval: 3s
       timeout: 5s
       retries: 15
       start_period: 15s
 
 volumes:
-  bench-astro-cache:
+  bench-astro-qjs-cache:

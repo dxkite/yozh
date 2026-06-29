@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/dxkite/astro-runtime/trace"
-	"github.com/dxkite/qjs"
 )
 
 // spanLog is an internal RequestTrace that accumulates per-request timing for the ssr spans log.
@@ -268,16 +267,15 @@ func HandleRequest(rc *RequestContext) {
 	}
 
 	prt := rc.prt
-	ctx := prt.rt.Context()
+	ctx := prt.rt.Ctx()
 	code := "await __handleRequest(" + string(payloadJSON) + ")"
 
 	// Allocate a fresh streaming channel for this request.
 	// Buffer=8 allows JS to run a few chunks ahead without blocking on slow clients.
 	prt.streamCh = make(chan ResponseSignal, 8)
-	// Inject the per-request context into the QJS context so host function callbacks
-	// (SetGoFunc/SetGoAsyncFunc receive *qjs.Context as context.Context) can access
-	// per-request log attrs and cancellation signals via ctx.Value / ctx.Done.
-	prt.rt.Context().Context = goCtx
+	// Inject the per-request context into the JS context so host function callbacks
+	// can access per-request log attrs and cancellation signals via ctx.Value / ctx.Done.
+	ctx.SetContext(goCtx)
 	ch := prt.streamCh // capture local reference
 
 	rc.spanLog.evalStart = time.Now()
@@ -286,14 +284,10 @@ func HandleRequest(rc *RequestContext) {
 	// rc.release() is called. Falls back to a temporary goroutine if all workers are busy.
 	rc.pool.submit(goCtx, func() {
 		evalStart := rc.spanLog.evalStart
-		resultVal, evalErr := ctx.Eval("handle-request.js", qjs.Code(code), qjs.FlagAsync())
+		evalErr := ctx.Eval("handle-request.js", code, EvalAsync)
 		evalEnd := time.Now()
 		if rt := trace.ContextRequestTrace(rc.goCtx); rt != nil && rt.GoCallDone != nil {
 			rt.GoCallDone(evalStart, evalEnd, evalErr)
-		}
-
-		if resultVal != nil {
-			resultVal.Free()
 		}
 
 		// If __go_sendHeaders was never called (JS error before response), signal error
@@ -319,11 +313,18 @@ func HandleRequest(rc *RequestContext) {
 		if !info.doneAt.IsZero() {
 			latency = info.doneAt.Sub(rc.requestAt).Seconds()
 		}
+		sl := rc.spanLog
 		rtlog.InfoContext(rc.goCtx, "ssr request",
 			"status", info.status,
 			"latency", latency,
+			slog.Group("runtime",
+				"pool_get_ms", sl.poolGet.Milliseconds(),
+				"js_eval_ms", sl.jsEval.Milliseconds(),
+				"response_write_ms", sl.response.Milliseconds(),
+				"js_tail_ms", sl.jsTail.Milliseconds(),
+			),
 		)
-		rc.spanLog.log(rc.goCtx)
+		sl.log(rc.goCtx)
 		rc.release()
 	})
 
@@ -353,9 +354,9 @@ func HandleRequest(rc *RequestContext) {
 		rt.GotFirstResponseByte()
 	}
 	sl := rc.spanLog
-	w.Header().Set("Server-Timing", strings.Join([]string{
-		serverTimingEntry("pool-get", sl.poolGet),
-		serverTimingEntry("js-eval", sl.jsEval),
+	w.Header().Add("Server-Timing", strings.Join([]string{
+		serverTimingEntry("pool", sl.poolGet),
+		serverTimingEntry("js", sl.jsEval),
 	}, ", "))
 	w.WriteHeader(savedStatus)
 	flusher, canFlush := w.(http.Flusher)
@@ -398,12 +399,17 @@ readLoop:
 					}
 				}
 			}
-			// Trailer: response.write + JS checkpoints (all known now that ResponseDone fired).
-			trailerParts := []string{serverTimingEntry("response-write", sl.response)}
+			// Trailer: JS checkpoints (stream mode only; buffer mode injects them in initial headers).
+			// Only ssr and resp are exposed; other spans are tracked internally but not sent.
+			var trailerParts []string
 			for _, cp := range sig.JSCheckpoints {
-				trailerParts = append(trailerParts, serverTimingEntry(cp.Name, cp.End.Sub(cp.Start)))
+				if cp.Name == "ssr" || cp.Name == "resp" {
+					trailerParts = append(trailerParts, serverTimingEntry(cp.Name, cp.End.Sub(cp.Start)))
+				}
 			}
-			w.Header().Set(http.TrailerPrefix+"Server-Timing", strings.Join(trailerParts, ", "))
+			if len(trailerParts) > 0 {
+				w.Header().Set(http.TrailerPrefix+"Server-Timing", strings.Join(trailerParts, ", "))
+			}
 			for range ch {}
 			rc.tailCh <- responseInfo{doneAt: doneAt, status: savedStatus}
 			return

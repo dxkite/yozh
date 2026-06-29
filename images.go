@@ -12,12 +12,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/image/draw"
 	"golang.org/x/image/webp"
 )
 
 var errUnsupportedFormat = errors.New("unsupported image format")
+
+var fetchClient = &http.Client{Timeout: 30 * time.Second}
 
 // HandleImageCDN implements the /.netlify/images image transformation endpoint.
 // Parameters: url (source path or absolute URL), fm (format), w, h (dimensions), q (quality 1-100), fit (cover/contain/fill).

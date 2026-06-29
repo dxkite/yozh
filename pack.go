@@ -22,35 +22,49 @@ func loadPackData(r io.Reader) ([]byte, error) {
 	return io.ReadAll(r)
 }
 
-// openPackInMemory opens pack bytes and returns bundleBC + an in-memory distFS.
-// The zip reader holds a reference to data, so data must stay alive as long as distFS is used.
-func openPackInMemory(data []byte) (bundleBC []byte, distFS fs.FS, err error) {
+// packContents holds the extracted contents of a .pack file.
+//
+// Exactly one of bundleBC or gojaCode is non-nil depending on the pack engine:
+//   - Goja pack: gojaCode set, bundleBC nil  (bundle.mjs + dist/)
+//   - QJS pack:  bundleBC set, gojaCode nil  (bundle.bc  + dist/)
+type packContents struct {
+	bundleBC []byte // QJS bytecode (bundle.bc)
+	gojaCode []byte // goja-format ESM (bundle.mjs)
+	distFS   fs.FS
+}
+
+// openPackContentsInMemory opens pack bytes and returns the contents.
+func openPackContentsInMemory(data []byte) (*packContents, error) {
 	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		return nil, nil, fmt.Errorf("open zip: %w", err)
+		return nil, fmt.Errorf("open zip: %w", err)
 	}
-	bundleBC, err = readZipEntry(r, "bundle.bc")
-	if err != nil {
-		return nil, nil, fmt.Errorf("bundle.bc: %w", err)
+
+	gojaCode, _ := readZipEntry(r, "bundle.mjs")
+	bundleBC, _ := readZipEntry(r, "bundle.bc")
+
+	if len(gojaCode) == 0 && len(bundleBC) == 0 {
+		return nil, fmt.Errorf("pack: missing bundle.mjs (goja) or bundle.bc (qjs)")
 	}
+
 	sub, err := fs.Sub(r, "dist")
 	if err != nil {
-		return nil, nil, fmt.Errorf("dist sub-fs: %w", err)
+		return nil, fmt.Errorf("dist sub-fs: %w", err)
 	}
-	return bundleBC, sub, nil
+	return &packContents{bundleBC: bundleBC, gojaCode: gojaCode, distFS: sub}, nil
 }
 
 // openPackFile reads a .pack from disk. With a non-empty cacheDir it extracts to
 // cacheDir/<sha256(data)>/ once and reuses the directory on subsequent calls.
-// Without cacheDir it falls back to openPackInMemory. maxSize controls how many
-// extracted caches are retained (0 or negative = unlimited).
-func openPackFile(path, cacheDir string, maxSize int) (bundleBC []byte, distFS fs.FS, err error) {
+// Without cacheDir it falls back to openPackContentsInMemory.
+// maxSize controls how many extracted caches are retained (0 = unlimited).
+func openPackFile(path, cacheDir string, maxSize int) (*packContents, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read pack %s: %w", path, err)
+		return nil, fmt.Errorf("read pack %s: %w", path, err)
 	}
 	if cacheDir == "" {
-		return openPackInMemory(data)
+		return openPackContentsInMemory(data)
 	}
 	return extractPackToCache(data, cacheDir, maxSize)
 }
@@ -59,7 +73,6 @@ func openPackFile(path, cacheDir string, maxSize int) (bundleBC []byte, distFS f
 var packCacheMetaMu sync.Mutex
 
 // packCacheMeta is the in-memory representation of cacheDir/metadata.json.
-// Entries maps each cache key to its last-access time (Unix nanoseconds).
 type packCacheMeta struct {
 	Entries map[string]int64 `json:"entries"`
 }
@@ -84,51 +97,61 @@ func writePackCacheMeta(cacheDir string, meta packCacheMeta) {
 	_ = os.WriteFile(filepath.Join(cacheDir, "metadata.json"), data, 0644)
 }
 
-// extractPackToCache extracts a pack to cacheDir/<sha256>/ and returns bundleBC
-// and a distFS backed by the extracted directory. Cache hit skips extraction and
-// updates metadata.json for LRU tracking. maxSize limits how many extracted cache
-// directories are kept; oldest by recorded access time are removed when the limit
-// is exceeded. maxSize <= 0 means unlimited.
-func extractPackToCache(data []byte, cacheDir string, maxSize int) (bundleBC []byte, distFS fs.FS, err error) {
+// extractPackToCache extracts a pack to cacheDir/<sha256>/ and returns a packContents
+// backed by the extracted directory. Cache hit (detected by presence of a bundle file)
+// skips extraction and updates metadata.json for LRU tracking.
+// maxSize limits how many extracted cache directories are kept (0 = unlimited).
+func extractPackToCache(data []byte, cacheDir string, maxSize int) (*packContents, error) {
 	sum := sha256.Sum256(data)
 	key := hex.EncodeToString(sum[:])
 	dir := filepath.Join(cacheDir, key)
-	bcPath := filepath.Join(dir, "bundle.bc")
-	distPath := filepath.Join(dir, "dist")
 
-	if _, err := os.Stat(bcPath); err == nil {
+	// Cache hit: either bundle file is present.
+	mjsPresent := fileExists(filepath.Join(dir, "bundle.mjs"))
+	bcPresent := fileExists(filepath.Join(dir, "bundle.bc"))
+	if mjsPresent || bcPresent {
 		rtlog.Info("pack cache hit", "dir", dir)
 		packCacheMetaMu.Lock()
 		meta := readPackCacheMeta(cacheDir)
 		meta.Entries[key] = time.Now().UnixNano()
 		writePackCacheMeta(cacheDir, meta)
 		packCacheMetaMu.Unlock()
-		bc, err := os.ReadFile(bcPath)
-		if err != nil {
-			return nil, nil, err
-		}
-		return bc, os.DirFS(distPath), nil
+		return readPackFromDir(dir)
 	}
 
 	rtlog.Info("pack cache miss", "dir", dir)
 	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		return nil, nil, fmt.Errorf("open zip: %w", err)
+		return nil, fmt.Errorf("open zip: %w", err)
 	}
 	if err := extractZip(r, dir); err != nil {
-		return nil, nil, fmt.Errorf("extract: %w", err)
-	}
-	bc, err := os.ReadFile(bcPath)
-	if err != nil {
-		return nil, nil, err
+		return nil, fmt.Errorf("extract: %w", err)
 	}
 	evictPackCache(cacheDir, key, maxSize)
-	return bc, os.DirFS(distPath), nil
+	return readPackFromDir(dir)
 }
 
-// evictPackCache registers currentKey in metadata.json with the current timestamp,
-// then removes the oldest entries (by recorded access time) until at most maxSize
-// directories remain. currentKey is never removed. maxSize <= 0 is a no-op.
+// readPackFromDir reads pack contents from an extracted cache directory.
+func readPackFromDir(dir string) (*packContents, error) {
+	distPath := filepath.Join(dir, "dist")
+
+	gojaCode, _ := os.ReadFile(filepath.Join(dir, "bundle.mjs"))
+	bundleBC, _ := os.ReadFile(filepath.Join(dir, "bundle.bc"))
+
+	if len(gojaCode) == 0 && len(bundleBC) == 0 {
+		return nil, fmt.Errorf("pack: missing bundle.mjs or bundle.bc in %s", dir)
+	}
+	return &packContents{bundleBC: bundleBC, gojaCode: gojaCode, distFS: os.DirFS(distPath)}, nil
+}
+
+// fileExists reports whether path exists on disk.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// evictPackCache registers currentKey in metadata.json then removes the oldest
+// entries until at most maxSize directories remain. maxSize <= 0 is a no-op.
 func evictPackCache(cacheDir, currentKey string, maxSize int) {
 	packCacheMetaMu.Lock()
 	defer packCacheMetaMu.Unlock()
@@ -136,7 +159,6 @@ func evictPackCache(cacheDir, currentKey string, maxSize int) {
 	meta := readPackCacheMeta(cacheDir)
 	meta.Entries[currentKey] = time.Now().UnixNano()
 
-	// Drop metadata entries whose directories no longer exist.
 	for k := range meta.Entries {
 		if _, err := os.Stat(filepath.Join(cacheDir, k)); os.IsNotExist(err) {
 			delete(meta.Entries, k)
@@ -231,24 +253,34 @@ func readZipEntry(r *zip.Reader, name string) ([]byte, error) {
 
 // ── Pack builder ──────────────────────────────────────────────────────────────
 
-// BuildPack compiles jsCode to QuickJS bytecode and writes a deployable .pack zip
-// to outPath. The pack embeds bundle.mjs, bundle.bc, and (optionally) the dist/
-// directory from distDir. Pass an empty distDir to omit static assets.
+// BuildPack bundles jsCode into a deployable .pack zip at outPath.
 //
-// Typical use:
+// The output format depends on engineKind:
 //
-//	jsCode, err := astroruntime.BundleSSR(entryPath)
-//	err = astroruntime.BuildPack("out.pack", jsCode, "dist")
-func BuildPack(outPath string, jsCode []byte, distDir string) error {
-	bc, err := CompileBundleBytecode(jsCode)
-	if err != nil {
-		return fmt.Errorf("compile bytecode: %w", err)
+//	EngineGoja → bundle.mjs (goja-format ESM) + dist/
+//	EngineQJS  → bundle.bc  (QuickJS bytecode) + dist/  (requires -tags qjs)
+//
+// jsCode must be a self-contained ESM bundle from BundleSSR.
+func BuildPack(outPath string, jsCode []byte, distDir string, engineKind EngineKind) error {
+	switch engineKind {
+	case EngineQJS:
+		bc, err := CompileBundleBytecode(jsCode)
+		if err != nil {
+			return fmt.Errorf("compile bytecode: %w", err)
+		}
+		return writePack(outPath, nil, bc, distDir)
+	default: // EngineGoja
+		gojaCode, err := ConvertBundleForGoja(jsCode)
+		if err != nil {
+			return fmt.Errorf("convert goja bundle: %w", err)
+		}
+		return writePack(outPath, gojaCode, nil, distDir)
 	}
-	return writePack(outPath, jsCode, bc, distDir)
 }
 
-// writePack creates a .pack zip containing bundle.mjs, bundle.bc, and dist/.
-func writePack(outPath string, jsCode, bcBytes []byte, distDir string) error {
+// writePack creates a .pack zip.
+// Exactly one of gojaCode / bcBytes should be non-nil (engine-specific).
+func writePack(outPath string, gojaCode, bcBytes []byte, distDir string) error {
 	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
 		return err
 	}
@@ -260,11 +292,15 @@ func writePack(outPath string, jsCode, bcBytes []byte, distDir string) error {
 	w := zip.NewWriter(f)
 	defer w.Close()
 
-	if err := zipAddBytes(w, "bundle.mjs", jsCode); err != nil {
-		return err
+	if len(gojaCode) > 0 {
+		if err := zipAddBytes(w, "bundle.mjs", gojaCode); err != nil {
+			return err
+		}
 	}
-	if err := zipAddBytes(w, "bundle.bc", bcBytes); err != nil {
-		return err
+	if len(bcBytes) > 0 {
+		if err := zipAddBytes(w, "bundle.bc", bcBytes); err != nil {
+			return err
+		}
 	}
 	if fi, err := os.Stat(distDir); err == nil && fi.IsDir() {
 		if err := zipAddDir(w, distDir, "dist"); err != nil {

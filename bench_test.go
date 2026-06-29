@@ -1,15 +1,16 @@
 package astroruntime
 
 import (
+	"net/http/httptest"
 	"testing"
-
-	"github.com/dxkite/qjs"
 )
 
-// benchBundleSrc is a small but realistic bundle used for setup benchmarks.
-var benchBundleSrc = []byte(`
-export default function(config) {
-    return async function handler(request, context) {
+// benchGojaBundle is an ESM-format bundle for the goja engine.
+// Sets globalThis.__ssrEntry as a side effect; export {} makes it a valid ES module
+// for sobek's ParseModule.
+var benchGojaBundle = []byte(`
+var handler = function(config) {
+    return async function(request, context) {
         var url = new URL(request.url);
         return new Response("hello " + url.pathname, {
             status: 200,
@@ -19,126 +20,56 @@ export default function(config) {
             },
         });
     };
-}
+};
+globalThis.__ssrEntry = { default: handler };
+export {};
 `)
 
-// setupRuntimeLegacy replicates the pre-compilation path: source code eval per worker.
-// Used only for benchmark comparison; not part of the production code path.
-func setupRuntimeLegacy(rt *qjs.Runtime, bundleCode []byte, env map[string]string) error {
-	ctx := rt.Context()
-	keyReg := make(map[string]*cryptoKey)
-
-	if err := injectHostFunctions(ctx, env, keyReg); err != nil {
-		return err
-	}
-
-	for _, step := range []struct{ name, code string }{
-		{"web-api-polyfill.js", webAPIPolyfill},
-		{"crypto-polyfill.js", cryptoPolyfill},
-		{"file-polyfill.js", filePolyfill},
-		{"env-api-stub.js", envAPIStub},
-		{"intl-stub.js", intlStub},
-		{"structured-clone.js", structuredCloneGuard},
-		{"console.js", consoleDef},
-		{"fetch.js", fetchDef},
-	} {
-		v, err := ctx.Eval(step.name, qjs.Code(step.code))
+// BenchmarkNewPoolGojaSize1 measures goja pool creation with size=1.
+// Goja evals source directly; no bytecode compilation step.
+func BenchmarkNewPoolGojaSize1(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		p, err := NewPool(benchGojaBundle, WithEngineKind(EngineGoja), WithSize(1))
 		if err != nil {
-			return err
+			b.Fatal(err)
 		}
-		v.Free()
+		p.Close()
 	}
+}
 
-	v, err := ctx.Eval("entry.mjs", qjs.Code(string(bundleCode)), qjs.TypeModule())
+// BenchmarkNewPoolGojaSize4 measures goja pool creation with size=4.
+func BenchmarkNewPoolGojaSize4(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		p, err := NewPool(benchGojaBundle, WithEngineKind(EngineGoja), WithSize(4))
+		if err != nil {
+			b.Fatal(err)
+		}
+		p.Close()
+	}
+}
+
+// BenchmarkSSRRequest_Goja measures sequential SSR request throughput with goja.
+func BenchmarkSSRRequest_Goja(b *testing.B) {
+	p, err := NewPool(benchGojaBundle, WithEngineKind(EngineGoja), WithSize(1))
 	if err != nil {
-		return err
+		b.Fatal(err)
 	}
-	v.Free()
+	defer p.Close()
 
-	v, err = ctx.Eval("bootstrap.mjs", qjs.Code(bootstrapMJS), qjs.TypeModule())
-	if err != nil {
-		return err
-	}
-	v.Free()
-	return nil
-}
-
-// newPoolLegacy creates a pool using source code eval (old approach), for benchmark comparison.
-func newPoolLegacy(bundleCode []byte, env map[string]string, size int) (*Pool, error) {
-	p := &Pool{
-		pool:    make(chan *pooledRuntime, size),
-		workers: make(chan func(), size*2),
-	}
-	for i := 0; i < size; i++ {
-		go func() {
-			for fn := range p.workers {
-				fn()
-			}
-		}()
-	}
-	rt, err := qjs.New(qjs.Option{})
-	if err != nil {
-		return nil, err
-	}
-	if err := setupRuntimeLegacy(rt, bundleCode, env); err != nil {
-		rt.Close()
-		return nil, err
-	}
-	p.pool <- &pooledRuntime{rt: rt}
-	return p, nil
-}
-
-// ── NewPool end-to-end: size=1 ────────────────────────────────────────────────
-
-// BenchmarkNewPoolLegacySize1 measures total NewPool(size=1) time with source eval.
-func BenchmarkNewPoolLegacySize1(b *testing.B) {
+	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		p, err := newPoolLegacy(benchBundleSrc, map[string]string{}, 1)
+		req := httptest.NewRequest("GET", "http://localhost/bench", nil)
+		w := httptest.NewRecorder()
+		rc, err := p.RequestContext(w, req)
 		if err != nil {
 			b.Fatal(err)
 		}
-		p.Close()
-	}
-}
-
-// BenchmarkNewPoolBytecodeSize1 measures total NewPool(size=1) time with bytecode (new).
-// Includes one-time compilation cost.
-func BenchmarkNewPoolBytecodeSize1(b *testing.B) {
-	b.ReportAllocs()
-	for b.Loop() {
-		p, err := NewPool(benchBundleSrc, WithSize(1))
-		if err != nil {
-			b.Fatal(err)
+		HandleRequest(rc)
+		if w.Code != 200 {
+			b.Fatalf("unexpected status %d: %s", w.Code, w.Body.String())
 		}
-		p.Close()
-	}
-}
-
-// ── NewPool end-to-end: size=4 ────────────────────────────────────────────────
-
-// BenchmarkNewPoolLegacySize4 measures total NewPool(size=4) time with source eval.
-// Legacy cost scales linearly with pool size.
-func BenchmarkNewPoolLegacySize4(b *testing.B) {
-	b.ReportAllocs()
-	for b.Loop() {
-		p, err := newPoolLegacy(benchBundleSrc, map[string]string{}, 4)
-		if err != nil {
-			b.Fatal(err)
-		}
-		p.Close()
-	}
-}
-
-// BenchmarkNewPoolBytecodeSize4 measures total NewPool(size=4) time with bytecode (new).
-// Compilation cost is paid once; worker setup reuses the same bytecodes.
-func BenchmarkNewPoolBytecodeSize4(b *testing.B) {
-	b.ReportAllocs()
-	for b.Loop() {
-		p, err := NewPool(benchBundleSrc, WithSize(4))
-		if err != nil {
-			b.Fatal(err)
-		}
-		p.Close()
 	}
 }

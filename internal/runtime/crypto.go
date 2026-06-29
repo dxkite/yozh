@@ -1,4 +1,4 @@
-﻿package astroruntime
+package jsruntime
 
 import (
 	"context"
@@ -14,8 +14,6 @@ import (
 	"fmt"
 	"hash"
 	"strings"
-
-	"github.com/dxkite/qjs"
 )
 
 type algoSpec struct {
@@ -60,13 +58,11 @@ func makeHasher(hashName string) (func() hash.Hash, error) {
 }
 
 // cryptoErr formats a crypto error as an "ERROR:..." string returned to JS.
-// JS callers check for this prefix to distinguish crypto failures from normal returns.
 func cryptoErr(msg string) (any, error) {
 	return "ERROR:" + msg, nil
 }
 
-func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
-	// __go_cryptoSubtleDigest(algo, dataB64) 鈫?resultB64
+func injectCryptoSubtle(ctx JSContext, keyReg map[string]*cryptoKey) {
 	ctx.SetGoFunc("__go_cryptoSubtleDigest", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 2 {
 			return cryptoErr("missing arguments")
@@ -96,7 +92,6 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		return base64.StdEncoding.EncodeToString(h), nil
 	})
 
-	// __go_cryptoSubtleImportKey(format, dataB64orJWK, algoJSON, extractable, usagesJSON) 鈫?keyId
 	ctx.SetGoFunc("__go_cryptoSubtleImportKey", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 5 {
 			return cryptoErr("missing arguments")
@@ -122,7 +117,7 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			}
 			keyBytes = b
 		case "jwk":
-			var jwk map[string]interface{}
+			var jwk map[string]any
 			if err := json.Unmarshal([]byte(rawData), &jwk); err != nil {
 				return cryptoErr("invalid JWK: " + err.Error())
 			}
@@ -154,7 +149,6 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		return id, nil
 	})
 
-	// __go_cryptoSubtleGenerateKey(algoJSON, extractable, usagesJSON) 鈫?keyId
 	ctx.SetGoFunc("__go_cryptoSubtleGenerateKey", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 3 {
 			return cryptoErr("missing arguments")
@@ -216,7 +210,6 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		return id, nil
 	})
 
-	// __go_cryptoSubtleExportKey(format, keyId) 鈫?base64 or JWK JSON string
 	ctx.SetGoFunc("__go_cryptoSubtleExportKey", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 2 {
 			return cryptoErr("missing arguments")
@@ -235,7 +228,7 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		case "raw":
 			return base64.StdEncoding.EncodeToString(ck.Raw), nil
 		case "jwk":
-			jwk := map[string]interface{}{
+			jwk := map[string]any{
 				"kty":     "oct",
 				"k":       base64.RawURLEncoding.EncodeToString(ck.Raw),
 				"key_ops": ck.Usages,
@@ -273,7 +266,6 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		}
 	})
 
-	// __go_cryptoSubtleSign(algoJSON, keyId, dataB64) 鈫?sigB64
 	ctx.SetGoFunc("__go_cryptoSubtleSign", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 3 {
 			return cryptoErr("missing arguments")
@@ -307,7 +299,6 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		}
 	})
 
-	// __go_cryptoSubtleVerify(algoJSON, keyId, sigB64, dataB64) 鈫?"true"/"false"
 	ctx.SetGoFunc("__go_cryptoSubtleVerify", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 4 {
 			return "false", nil
@@ -345,8 +336,6 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		}
 	})
 
-	// __go_cryptoSubtleEncrypt(algoJSON, keyId, plaintextB64) 鈫?ciphertextB64
-	// algoJSON.iv is base64-encoded (converted by _algoToJSON in JS)
 	ctx.SetGoFunc("__go_cryptoSubtleEncrypt", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 3 {
 			return cryptoErr("missing arguments")
@@ -407,7 +396,6 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		}
 	})
 
-	// __go_cryptoSubtleDecrypt(algoJSON, keyId, ciphertextB64) 鈫?plaintextB64
 	ctx.SetGoFunc("__go_cryptoSubtleDecrypt", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 3 {
 			return cryptoErr("missing arguments")
@@ -444,11 +432,11 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			if len(iv) != gcm.NonceSize() {
 				return cryptoErr(fmt.Sprintf("AES-GCM: IV must be %d bytes, got %d", gcm.NonceSize(), len(iv)))
 			}
-			plaintext, err := gcm.Open(nil, iv, ciphertext, nil)
+			plain, err := gcm.Open(nil, iv, ciphertext, nil)
 			if err != nil {
 				return cryptoErr("AES-GCM decrypt failed: " + err.Error())
 			}
-			return base64.StdEncoding.EncodeToString(plaintext), nil
+			return base64.StdEncoding.EncodeToString(plain), nil
 		case "AES-CBC":
 			iv, err := base64.StdEncoding.DecodeString(algo.IV)
 			if err != nil {
@@ -464,9 +452,9 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 			if len(ciphertext)%aes.BlockSize != 0 {
 				return cryptoErr("AES-CBC: ciphertext length not multiple of block size")
 			}
-			plaintext := make([]byte, len(ciphertext))
-			cipher.NewCBCDecrypter(block, iv).CryptBlocks(plaintext, ciphertext)
-			unpadded, err := pkcs7Unpad(plaintext, aes.BlockSize)
+			plain := make([]byte, len(ciphertext))
+			cipher.NewCBCDecrypter(block, iv).CryptBlocks(plain, ciphertext)
+			unpadded, err := pkcs7Unpad(plain, aes.BlockSize)
 			if err != nil {
 				return cryptoErr("AES-CBC unpad: " + err.Error())
 			}
@@ -476,7 +464,6 @@ func injectCryptoSubtle(ctx *qjs.Context, keyReg map[string]*cryptoKey) {
 		}
 	})
 
-	// __go_cryptoSubtleDeriveBits 鈥?P1, not yet implemented
 	ctx.SetGoFunc("__go_cryptoSubtleDeriveBits", func(_ context.Context, args ...any) (any, error) {
 		return cryptoErr("deriveBits not yet implemented (P1 feature)")
 	})
@@ -502,7 +489,6 @@ func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 	if pad == 0 || pad > blockSize {
 		return nil, fmt.Errorf("invalid padding byte")
 	}
-	// Verify all padding bytes in constant time (no early exit).
 	var invalid byte
 	for i := len(data) - pad; i < len(data); i++ {
 		invalid |= data[i] ^ byte(pad)
@@ -512,4 +498,3 @@ func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 	}
 	return data[:len(data)-pad], nil
 }
-

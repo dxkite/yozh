@@ -1,18 +1,14 @@
-package astroruntime
+package jsruntime
 
 import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/url"
-
-	"github.com/dxkite/qjs"
 )
 
 // injectBinaryOps registers host functions for binary data transfer between Go and QJS.
-// Enables efficient UTF-8 encoding/decoding and base64 conversion via Go stdlib.
-func injectBinaryOps(ctx *qjs.Context) {
-	// __go_textEncodeUTF8(str) → ArrayBuffer — Go string is already UTF-8
+func injectBinaryOps(ctx JSContext) {
 	ctx.SetGoFunc("__go_textEncodeUTF8", func(_ context.Context, args ...any) (any, error) {
 		if len(args) == 0 {
 			return []byte{}, nil
@@ -21,7 +17,6 @@ func injectBinaryOps(ctx *qjs.Context) {
 		return []byte(s), nil
 	})
 
-	// __go_textDecodeUTF8(b64) → string — decodes base64 bytes as UTF-8 string
 	ctx.SetGoFunc("__go_textDecodeUTF8", func(_ context.Context, args ...any) (any, error) {
 		if len(args) == 0 {
 			return "", nil
@@ -34,7 +29,6 @@ func injectBinaryOps(ctx *qjs.Context) {
 		return string(b), nil
 	})
 
-	// __go_bufToB64(jsonNumArray) → base64 string — JS passes byte array as JSON [1,2,3,...]
 	ctx.SetGoFunc("__go_bufToB64", func(_ context.Context, args ...any) (any, error) {
 		if len(args) == 0 {
 			return "", nil
@@ -51,7 +45,6 @@ func injectBinaryOps(ctx *qjs.Context) {
 		return base64.StdEncoding.EncodeToString(buf), nil
 	})
 
-	// __go_b64ToBuf(b64) → ArrayBuffer — decodes base64 to binary ArrayBuffer
 	ctx.SetGoFunc("__go_b64ToBuf", func(_ context.Context, args ...any) (any, error) {
 		if len(args) == 0 {
 			return []byte{}, nil
@@ -64,12 +57,7 @@ func injectBinaryOps(ctx *qjs.Context) {
 		return b, nil
 	})
 
-	// __go_arrayBufToStr(arrayBuffer) → string — zero-copy UTF-8 decode.
-	// JS passes an ArrayBuffer (Uint8Array.buffer); qjs marshals it to []byte.
-	// This avoids JSON.stringify([N numbers]) + base64 round-trip entirely.
-	// PERF: the original Response.text() pushed each byte into a JS array and called
-	// JSON.stringify([222K numbers]), which cost ~4s for a 222KB page. This host
-	// function reduced body collection from ~4s to ~127ms.
+	// __go_arrayBufToStr avoids JSON.stringify([N numbers]) round-trip for body collection.
 	ctx.SetGoFunc("__go_arrayBufToStr", func(_ context.Context, args ...any) (any, error) {
 		if len(args) == 0 {
 			return "", nil
@@ -82,9 +70,6 @@ func injectBinaryOps(ctx *qjs.Context) {
 		return string(b), nil
 	})
 
-	// __go_arrayBufToB64(arrayBuffer) → base64 string — zero-copy base64 encode.
-	// JS passes an ArrayBuffer directly; qjs marshals it to []byte, avoiding the
-	// JSON.stringify([N numbers]) round-trip used by __go_bufToB64.
 	ctx.SetGoFunc("__go_arrayBufToB64", func(_ context.Context, args ...any) (any, error) {
 		if len(args) == 0 {
 			return "", nil
@@ -99,7 +84,7 @@ func injectBinaryOps(ctx *qjs.Context) {
 }
 
 // injectURLParser registers __go_urlParse for WHATWG-compliant URL parsing via net/url.
-func injectURLParser(ctx *qjs.Context) {
+func injectURLParser(ctx JSContext) {
 	ctx.SetGoFunc("__go_urlParse", func(_ context.Context, args ...any) (any, error) {
 		errResult := func(msg string) (any, error) {
 			r, _ := json.Marshal(map[string]string{"error": msg})

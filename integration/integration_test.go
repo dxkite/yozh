@@ -1,3 +1,5 @@
+//go:build qjs
+
 package integration_test
 
 import (
@@ -23,6 +25,7 @@ var (
 	sessionPool *astroruntime.Pool    // testapp-ssr bundle, size=1, for TestCartSession (requires single runtime)
 	minPool     *astroruntime.Pool    // eval-based minimal bundle, size=4, for polyfill/crypto/BFF tests
 	packRT      *astroruntime.Runtime // pack-based Runtime, for pack smoke tests
+	gojaPool    *astroruntime.Pool    // goja engine, IIFE bench bundle, size=4, for engine comparison benchmarks
 )
 
 // minBundle is a minimal ESM bundle that evals arbitrary JS expressions via query param,
@@ -100,6 +103,19 @@ func TestMain(m *testing.M) {
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "NewRuntime packRT: %v\n", err)
+		os.Exit(1)
+	}
+
+	// gojaPool uses the IIFE-format bench bundle with the goja engine.
+	// This is intentionally a simple synthetic bundle (not the real Astro app) so that
+	// the benchmark can run without building the example project.
+	gojaPool, err = astroruntime.NewPool(
+		gojaBenchBundle,
+		astroruntime.WithEngineKind(astroruntime.EngineGoja),
+		astroruntime.WithSize(4),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "NewPool gojaPool: %v\n", err)
 		os.Exit(1)
 	}
 
