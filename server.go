@@ -83,8 +83,7 @@ func WithDistDir(path string) RuntimeOption {
 }
 
 // WithCacheDir sets a directory for persistent caching.
-// For pack sources: extracted to cacheDir/<sha256(pack)>/ (cache hit skips extraction).
-// For bundle sources: compiled QJS bytecodes cached as cacheDir/<hash>.bc.
+// Pack sources are extracted to cacheDir/<sha256(pack)>/ (cache hit skips extraction).
 func WithCacheDir(dir string) RuntimeOption {
 	return func(c *runtimeConfig) { c.cacheDir = dir }
 }
@@ -179,11 +178,7 @@ func NewRuntime(opts ...RuntimeOption) (*Runtime, error) {
 
 	case len(cfg.bundle) > 0:
 		distFS := cfg.distFS // may be nil
-		poolOpts := cfg.poolOpts
-		if cfg.cacheDir != "" {
-			poolOpts = append(poolOpts, WithBundleCache(cfg.cacheDir))
-		}
-		pool, err := NewPool(cfg.bundle, poolOpts...)
+		pool, err := NewPool(cfg.bundle, cfg.poolOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("pool init: %w", err)
 		}

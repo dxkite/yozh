@@ -100,7 +100,7 @@ func NewRuntime(opts ...RuntimeOption) (*Runtime, error)
 WithPackReader  → loadPackData → 同 WithPack
 WithPack        → openPackInMemory 或 extractPackToCache（有 cacheDir 时）
 WithPackFile    → openPackFile
-WithBundle      → 直接传 jsCode 给 NewPool（可选 WithBundleCache）
+WithBundle      → 直接传 jsCode 给 NewPool
 ```
 
 ### RuntimeOption
@@ -283,16 +283,16 @@ Server-Timing 写入细节：
 ```go
 type GoFunc     func(ctx context.Context, args ...any) (any, error)
 type EvalMode   uint8  // EvalScript | EvalModule | EvalAsync
-type JSContext  interface { ... }  // Eval / EvalBytecode / Compile / SetGoFunc / SetGoAsyncFunc
+type JSContext  interface { ... }  // Eval / SetGoFunc / SetGoAsyncFunc
 type JSRuntime  interface { Ctx() JSContext; Close() }
-type JSEngine   interface { New() (JSRuntime, error); SupportsBytecode() bool }
+type JSEngine   interface { New() (JSRuntime, error) }
 type EngineKind string  // "goja"
 ```
 
 ### engine_goja.go — goja/sobek 实现
 
-纯 Go JS 引擎（grafana/sobek）。不支持字节码（`SupportsBytecode() = false`）。
-bundle 以 IIFE 格式加载（`WithGojaBundle`），由 `globalThis.__ssrEntry` 传递给 bootstrap-goja.js。
+纯 Go JS 引擎（grafana/sobek）。bundle 以 IIFE 格式加载（`WithGojaBundle`），
+由 `globalThis.__ssrEntry` 传递给 bootstrap-goja.js。
 
 ### dispatch_stub.go — 引擎分派
 
@@ -301,16 +301,6 @@ func NewEngineForKind(kind EngineKind, ...) JSEngine  // 始终返回 gojaEngine
 func DefaultEngineKind() EngineKind                   // 返回 EngineGoja
 func ValidateEngineKind(kind EngineKind) error
 ```
-
-### bytecode.go / bytecode_stub.go — 字节码类型（为接口兼容保留）
-
-```go
-type PolyfillEntry struct { Name string; BC []byte }
-type BytecodeSet   struct { Polyfills []PolyfillEntry; Bundle []byte }
-func BundleCacheKey(bundleCode []byte) string  // SHA256(bundle + vcs.revision)
-```
-
-goja 不支持字节码，`CompileBytecodes` 不会被调用。
 
 ### setup.go — SetupRuntime
 
@@ -322,13 +312,12 @@ type StreamCallbacks struct {
 }
 
 type SetupOptions struct {
-    BCS    *BytecodeSet      // 保留用于接口兼容（goja 路径为 nil）
     Bundle []byte            // IIFE 格式 bundle 源码
     Env    map[string]string
     Stream StreamCallbacks
 }
 
-func SetupRuntime(ctx JSContext, opts SetupOptions, engine JSEngine) error
+func SetupRuntime(ctx JSContext, opts SetupOptions) error
 ```
 
 初始化顺序：host functions → stream callbacks → polyfills → bundle → bootstrap。

@@ -13,9 +13,6 @@ import (
 	"github.com/dxkite/astro-runtime/trace"
 )
 
-//go:embed bootstrap.mjs
-var bootstrapMJS string
-
 //go:embed bootstrap-goja.js
 var bootstrapGojaJS string
 
@@ -29,7 +26,6 @@ type StreamCallbacks struct {
 
 // SetupOptions configures a single JS runtime initialization.
 type SetupOptions struct {
-	BCS    *BytecodeSet      // nil = goja source path
 	Bundle []byte            // goja: ESM bundle source
 	Env    map[string]string
 	Stream StreamCallbacks
@@ -37,7 +33,7 @@ type SetupOptions struct {
 
 // SetupRuntime initializes a single JS runtime.
 // Order: host functions → stream callbacks → polyfills → bundle → bootstrap.
-func SetupRuntime(ctx JSContext, opts SetupOptions, engine JSEngine) error {
+func SetupRuntime(ctx JSContext, opts SetupOptions) error {
 	keyReg := make(map[string]*cryptoKey)
 
 	if err := injectHostFunctions(ctx, opts.Env, keyReg); err != nil {
@@ -89,32 +85,18 @@ func SetupRuntime(ctx JSContext, opts SetupOptions, engine JSEngine) error {
 		return nil, nil
 	})
 
-	if engine.SupportsBytecode() && opts.BCS != nil {
-		for _, step := range opts.BCS.Polyfills {
-			if err := ctx.EvalBytecode(step.Name, step.BC, EvalScript); err != nil {
-				return fmt.Errorf("polyfill %s: %w", step.Name, err)
-			}
+	for _, step := range polyfillSources() {
+		if err := ctx.Eval(step.name, step.src, EvalScript); err != nil {
+			return fmt.Errorf("polyfill %s: %w", step.name, err)
 		}
-		if err := ctx.EvalBytecode("entry.mjs", opts.BCS.Bundle, EvalModule); err != nil {
+	}
+	if len(opts.Bundle) > 0 {
+		if err := ctx.Eval("entry.js", string(opts.Bundle), EvalModule); err != nil {
 			return fmt.Errorf("bundle eval: %w", err)
 		}
-		if err := ctx.Eval("bootstrap.mjs", bootstrapMJS, EvalModule); err != nil {
-			return fmt.Errorf("bootstrap eval: %w", err)
-		}
-	} else {
-		for _, step := range polyfillSources() {
-			if err := ctx.Eval(step.name, step.src, EvalScript); err != nil {
-				return fmt.Errorf("polyfill %s: %w", step.name, err)
-			}
-		}
-		if len(opts.Bundle) > 0 {
-			if err := ctx.Eval("entry.js", string(opts.Bundle), EvalModule); err != nil {
-				return fmt.Errorf("bundle eval: %w", err)
-			}
-		}
-		if err := ctx.Eval("bootstrap.js", bootstrapGojaJS, EvalScript); err != nil {
-			return fmt.Errorf("bootstrap eval: %w", err)
-		}
+	}
+	if err := ctx.Eval("bootstrap.js", bootstrapGojaJS, EvalScript); err != nil {
+		return fmt.Errorf("bootstrap eval: %w", err)
 	}
 
 	return nil
