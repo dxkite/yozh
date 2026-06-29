@@ -318,7 +318,7 @@ export const POST: APIRoute = async ({ request, cookies }) => {
 server.go — 静态文件未命中
     │
     ▼
-handler.go → QJS/Astro middleware.ts（验证 session cookie）
+handler.go → goja/Astro middleware.ts（验证 session cookie）
     │ locals.userId = "user123"
     ▼
 pages/products/[id].astro
@@ -346,8 +346,8 @@ Go HTTP Response → 浏览器
 |---|---|
 | **无原生 Node 模块** | `fs`、`child_process` 不可用；文件操作需通过上游 HTTP 服务 |
 | **fetch 超时 30 秒** | 上游服务应有独立超时控制，避免单服务超时阻塞全页 |
-| **无共享内存** | 多个 QJS runtime 实例不共享内存，跨请求的共享状态（计数、缓存）需外部存储（Redis、DB） |
-| **CPU 密集任务** | 大量 JSON 处理、加解密建议移到 Go 层；QJS 单线程，长时间占用会阻塞同一 runtime 的其他请求 |
+| **无共享内存** | 多个 goja runtime 实例不共享内存，跨请求的共享状态（计数、缓存）需外部存储（Redis、DB） |
+| **CPU 密集任务** | 大量 JSON 处理、加解密建议移到 Go 层；goja 单线程，长时间占用会阻塞同一 runtime 的其他请求 |
 | **fetch 并发** | `Promise.allSettled([fetch(a), fetch(b)])` 支持真正并发，3×80ms ≈ 83ms（见 `TestBFFConcurrentFetch`） |
 
 ---
@@ -356,13 +356,13 @@ Go HTTP Response → 浏览器
 
 ### 原理
 
-astro-runtime 使用 [wazero](https://wazero.io/) 将 QuickJS 编译为 WASM 运行。wazero 的 WASM 实例**不是线程安全的** — 所有对 WASM 实例的调用必须来自同一 goroutine。
+astro-runtime 使用 goja/sobek（纯 Go JS 引擎）运行 SSR bundle。goja 的 runtime **不是 goroutine 安全的** — 所有对同一 goja runtime 的操作必须来自同一 goroutine。
 
 `fetch()` 通过 `SetGoAsyncFunc` 实现并发，核心机制为 `pendingCallbacks chan func()`：
 
 ```
-QJS goroutine（持有 WASM 实例）            Go 工作 goroutine（不接触 WASM）
-─────────────────────────────            ──────────────────────────────
+goja goroutine（持有 goja runtime）        Go 工作 goroutine（不接触 goja）
+──────────────────────────────────        ──────────────────────────────
 fetch(url) 被 JS 调用
   → 提取参数字符串
   → 创建 JS Promise
@@ -372,12 +372,12 @@ fetch(url) 被 JS 调用
 
 JS: Promise.allSettled([...]) 挂起
   → 调用 Await() 轮询循环：
-    drain channel → 在 QJS goroutine 上调用 resolve/reject（WASM 安全）
-    运行 QJS microtasks（QJS_ExecutePendingJob）
+    drain channel → 在 goja goroutine 上调用 resolve/reject
+    运行 goja microtasks（RunMicrotasks）
     检查 Promise 是否已 settled
 ```
 
-所有 WASM 调用始终在 QJS goroutine 上发生，满足 wazero 单线程要求；HTTP 请求在独立 goroutine 中并发执行。
+所有 goja 操作始终在同一 goroutine 上发生，满足 runtime 单 goroutine 约束；HTTP 请求在独立 goroutine 中并发执行。
 
 ### 并发效果
 

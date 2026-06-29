@@ -11,7 +11,7 @@ type EvalMode uint8
 const (
 	EvalScript EvalMode = iota // plain global script
 	EvalModule                  // ES module (static imports, export namespace)
-	EvalAsync                   // script with top-level await (qjs FlagAsync; goja: async IIFE)
+	EvalAsync                   // script with top-level await (async IIFE)
 )
 
 // JSContext is the engine-agnostic JS execution surface.
@@ -45,6 +45,4 @@ const (
 	EngineGoja EngineKind = "goja"
 )
 
-// EngineQJS, NewEngineForKind, ValidateEngineKind are defined in:
-//   - dispatch_qjs.go  (//go:build qjs)
-//   - dispatch_stub.go (//go:build !qjs)
+// NewEngineForKind, ValidateEngineKind are defined in dispatch_stub.go.

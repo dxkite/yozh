@@ -27,7 +27,7 @@ type poolConfig struct {
 	gojaBundle        []byte // IIFE-format bundle for goja engine (from pack's bundle-goja.mjs)
 	contextProvider   func(*http.Request) *NetlifyContext
 	requestTimeout    time.Duration // 0 = no timeout; applied per request via context.WithTimeout
-	engine            JSEngine      // nil → default qjs engine
+	engine            JSEngine
 }
 
 // PoolOption configures a JS runtime pool.
@@ -44,44 +44,40 @@ func WithSize(size int) PoolOption {
 	return func(c *poolConfig) { c.size = size }
 }
 
-// WithMemoryLimit caps the WASM heap per runtime in bytes. 0 = no limit. QJS only.
+// WithMemoryLimit is reserved for future engine use. Currently ignored.
 func WithMemoryLimit(bytes int) PoolOption {
 	return func(c *poolConfig) { c.memoryLimit = bytes }
 }
 
-// WithMaxStackSize caps the JS call stack per runtime in bytes. 0 = default (256 KB). QJS only.
+// WithMaxStackSize is reserved for future engine use. Currently ignored.
 func WithMaxStackSize(bytes int) PoolOption {
 	return func(c *poolConfig) { c.maxStackSize = bytes }
 }
 
-// WithMaxExecutionTime caps a single Eval call in milliseconds. 0 = no limit. QJS only.
+// WithMaxExecutionTime is reserved for future engine use. Currently ignored.
 func WithMaxExecutionTime(ms int) PoolOption {
 	return func(c *poolConfig) { c.maxExecutionTime = ms }
 }
 
-// WithGCThreshold controls the GC trigger threshold in bytes. 0 = default. QJS only.
+// WithGCThreshold is reserved for future engine use. Currently ignored.
 func WithGCThreshold(bytes int) PoolOption {
 	return func(c *poolConfig) { c.gcThreshold = bytes }
 }
 
 // WithGojaBundle sets the IIFE-format JS source used by the goja engine when the pool
-// is loaded from a .pack file (which provides QJS bytecodes but no IIFE source).
-// Ignored by the QJS engine. When unset, the main bundleCode passed to NewPool is used.
+// is loaded from a .pack file. When unset, the main bundleCode passed to NewPool is used.
 func WithGojaBundle(code []byte) PoolOption {
 	return func(c *poolConfig) { c.gojaBundle = code }
 }
 
-// WithPrecompiledBundle sets pre-compiled raw QuickJS bytecode for bundle.mjs.
-// Polyfills and glue are still compiled fresh on each pool init (fast, < 5 ms).
-// Use when the bundle.bc is already available (e.g. loaded from a .pack file).
+// WithPrecompiledBundle sets pre-compiled bytecode for bundle.mjs.
 // Ignored when engine does not support bytecode.
 func WithPrecompiledBundle(bc []byte) PoolOption {
 	return func(c *poolConfig) { c.precompiledBundle = bc }
 }
 
-// WithBundleCache enables raw bundle bytecode disk caching in dir.
-// Cache key = SHA256(bundle source + vcs.revision); a Go rebuild or bundle change
-// produces a cache miss. Pass an empty string to disable (default).
+// WithBundleCache enables bundle bytecode disk caching in dir.
+// Pass an empty string to disable (default).
 // Ignored when engine does not support bytecode.
 func WithBundleCache(dir string) PoolOption {
 	return func(c *poolConfig) { c.bundleCacheDir = dir }
@@ -112,8 +108,6 @@ func WithEngine(engine JSEngine) PoolOption {
 }
 
 // WithEngineKind selects the JS engine by kind using default options.
-// QJS-specific options (WithMemoryLimit, WithMaxStackSize, etc.) are applied
-// automatically for EngineQJS. For EngineGoja they are silently ignored.
 func WithEngineKind(kind EngineKind) PoolOption {
 	return func(c *poolConfig) {
 		c.engine = &kindSentinel{kind: kind}
@@ -157,10 +151,6 @@ type Pool struct {
 //  2. Web API polyfills (Headers, Request, Response, crypto, File, console, fetch)
 //  3. The ESM SSR bundle loaded in module mode (sets globalThis.__ssrHandler)
 //  4. The JS glue adapter (defines globalThis.__handleRequest)
-//
-// For QJS: JS source is compiled to bytecode on the first runtime (via sync.Once);
-// all subsequent runtimes reuse the same bytecodes.
-// For goja: source strings are evaluated directly; bytecode is not used.
 func NewPool(bundleCode []byte, opts ...PoolOption) (*Pool, error) {
 	cfg := &poolConfig{}
 	for _, o := range opts {
@@ -234,8 +224,6 @@ func NewPool(bundleCode []byte, opts ...PoolOption) (*Pool, error) {
 }
 
 // newRuntime creates and initializes a fresh JS runtime.
-// For QJS: bytecodes are compiled once on the first call (via sync.Once) and reused.
-// For goja: source strings are stored and eval'd per runtime.
 func (p *Pool) newRuntime() (*pooledRuntime, error) {
 	rt, err := p.engine.New()
 	if err != nil {

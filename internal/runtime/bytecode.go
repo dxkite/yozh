@@ -12,7 +12,7 @@ type PolyfillEntry struct {
 	BC   []byte
 }
 
-// BytecodeSet holds pre-compiled QuickJS bytecodes for a pool's lifetime.
+// BytecodeSet holds pre-compiled bytecodes for a pool's lifetime.
 // All pool workers share the same BytecodeSet (read-only after creation).
 type BytecodeSet struct {
 	Polyfills []PolyfillEntry

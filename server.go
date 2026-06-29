@@ -196,11 +196,8 @@ func NewRuntime(opts ...RuntimeOption) (*Runtime, error) {
 		distFS = cfg.distFS
 	}
 
-	// Infer default engine from pack content; user-supplied opts can override.
 	var packOpts []PoolOption
-	if len(pc.bundleBC) > 0 {
-		packOpts = append(packOpts, WithPrecompiledBundle(pc.bundleBC), WithEngineKind(EngineQJS))
-	} else if len(pc.gojaCode) > 0 {
+	if len(pc.gojaCode) > 0 {
 		packOpts = append(packOpts, WithGojaBundle(pc.gojaCode), WithEngineKind(EngineGoja))
 	}
 	poolOpts := append(packOpts, cfg.poolOpts...) // user opts override the above
