@@ -25,6 +25,8 @@ func (e *gojaEngine) New() (JSRuntime, error) {
 	}, nil
 }
 
+func (e *gojaEngine) SupportsBytecode() bool { return false }
+
 // gojaRuntime wraps *sobek.Runtime.
 type gojaRuntime struct {
 	rt  *sobek.Runtime
@@ -95,6 +97,14 @@ func (c *gojaContext) evalAsModule(filename, src string) error {
 		return fmt.Errorf("goja: module evaluation left pending Promise")
 	}
 }
+
+// EvalBytecode is not supported by sobek; falls back to Eval with source stored in bc.
+func (c *gojaContext) EvalBytecode(filename string, bc []byte, mode EvalMode) error {
+	return c.Eval(filename, string(bc), mode)
+}
+
+// Compile is not supported by sobek; always returns (nil, nil).
+func (c *gojaContext) Compile(_, _ string, _ EvalMode) ([]byte, error) { return nil, nil }
 
 func (c *gojaContext) SetGoFunc(name string, fn GoFunc) {
 	c.rt.Set(name, func(call sobek.FunctionCall) sobek.Value {

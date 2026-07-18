@@ -1,4 +1,40 @@
 
+if (!globalThis.MessageChannel) {
+  globalThis.MessagePort = function MessagePort() {
+    this._listeners = Object.create(null);
+    this._partner = null;
+  };
+  globalThis.MessagePort.prototype.postMessage = function(data) {
+    var partner = this._partner;
+    if (partner) {
+      var listeners = partner._listeners['message'] || [];
+      Promise.resolve().then(function() {
+        for (var i = 0; i < listeners.length; i++) listeners[i]({ data: data });
+      });
+    }
+  };
+  globalThis.MessagePort.prototype.addEventListener = function(type, fn) {
+    this._listeners[type] = this._listeners[type] || [];
+    this._listeners[type].push(fn);
+  };
+  globalThis.MessagePort.prototype.removeEventListener = function(type, fn) {
+    if (this._listeners[type]) this._listeners[type] = this._listeners[type].filter(function(l) { return l !== fn; });
+  };
+  Object.defineProperty(globalThis.MessagePort.prototype, 'onmessage', {
+    set: function(fn) { this._listeners['message'] = fn ? [fn] : []; },
+    get: function() { return (this._listeners['message'] || [])[0] || null; },
+  });
+  globalThis.MessagePort.prototype.start = function() {};
+  globalThis.MessagePort.prototype.close = function() {};
+  globalThis.MessageChannel = function MessageChannel() {
+    var p1 = new globalThis.MessagePort();
+    var p2 = new globalThis.MessagePort();
+    p1._partner = p2;
+    p2._partner = p1;
+    this.port1 = p1;
+    this.port2 = p2;
+  };
+}
 if (!globalThis.WebAssembly) { globalThis.WebAssembly = { validate: function() { return false; }, instantiate: function() { return Promise.reject(new Error('WebAssembly not supported')); }, compile: function() { return Promise.reject(new Error('WebAssembly not supported')); } }; }
 if (!globalThis.performance) { globalThis.performance = { now: function() { return Date.now(); }, timeOrigin: 0 }; }
 // setTimeout/clearTimeout — QJS has no native event loop timer.
@@ -50,6 +86,35 @@ if (!globalThis.atob) {
   };
 }
 if (!globalThis.navigator) { globalThis.navigator = { userAgent: 'Node.js', language: 'en', languages: ['en'], onLine: true }; }
+if (!globalThis.AbortController) {
+  globalThis.AbortSignal = class AbortSignal {
+    constructor() {
+      this.aborted = false;
+      this.reason = undefined;
+      this._listeners = [];
+    }
+    addEventListener(type, fn) { if (type === 'abort') this._listeners.push(fn); }
+    removeEventListener(type, fn) { if (type === 'abort') this._listeners = this._listeners.filter(function(l) { return l !== fn; }); }
+    throwIfAborted() { if (this.aborted) throw this.reason !== undefined ? this.reason : new DOMException('signal is aborted without reason', 'AbortError'); }
+    static abort(reason) { var s = new AbortSignal(); s.aborted = true; s.reason = reason; return s; }
+    static timeout(ms) { var s = new AbortSignal(); setTimeout(function() { s.aborted = true; s.reason = new DOMException('signal timed out', 'TimeoutError'); s._listeners.forEach(function(fn) { fn({ type: 'abort' }); }); }, ms); return s; }
+  };
+  globalThis.AbortController = class AbortController {
+    constructor() { this.signal = new AbortSignal(); }
+    abort(reason) {
+      if (this.signal.aborted) return;
+      this.signal.aborted = true;
+      this.signal.reason = reason !== undefined ? reason : new DOMException('signal is aborted without reason', 'AbortError');
+      var ls = this.signal._listeners.slice();
+      for (var i = 0; i < ls.length; i++) ls[i]({ type: 'abort' });
+    }
+  };
+  if (!globalThis.DOMException) {
+    globalThis.DOMException = class DOMException extends Error {
+      constructor(message, name) { super(message); this.name = name || 'DOMException'; }
+    };
+  }
+}
 if (!globalThis.location) { globalThis.location = { href: 'http://localhost/', hostname: 'localhost', origin: 'http://localhost', protocol: 'http:', pathname: '/', search: '', hash: '' }; }
 if (!globalThis.URL) {
   // URL uses Go's net/url via __go_urlParse for WHATWG-compliant parsing (IPv6, credentials, percent-encoding)
@@ -72,7 +137,11 @@ if (!globalThis.URL) {
     delete(k) { this._params = this._params.filter(function(p) { return p[0] !== k; }); }
     toString() { return this._params.map(function(p) { return encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1]); }).join('&'); }
     forEach(cb) { this._params.forEach(function(p) { cb(p[1], p[0]); }); }
-    [Symbol.iterator]() { return this._params[Symbol.iterator](); }
+    entries() { return this._params.map(function(p) { return [p[0], p[1]]; })[Symbol.iterator](); }
+    keys() { return this._params.map(function(p) { return p[0]; })[Symbol.iterator](); }
+    values() { return this._params.map(function(p) { return p[1]; })[Symbol.iterator](); }
+    get size() { return this._params.length; }
+    [Symbol.iterator]() { return this.entries(); }
   };
   globalThis.URL = class URL {
     constructor(input, base) {

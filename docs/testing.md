@@ -10,24 +10,37 @@
 | pnpm | v10+ |
 | Astro | 5.x |
 | @astrojs/netlify | 6.x |
-| JS 引擎 | github.com/grafana/sobek（goja Grafana fork） |
+| JS 引擎（QJS） | github.com/dxkite/qjs（QuickJS/WASM） |
+| JS 引擎（goja） | github.com/grafana/sobek（goja Grafana fork） |
 | 更新日期 | 2026-06-29 |
 
 ## 目录结构
 
 ```
-goja_test.go    # goja/sobek 引擎单元测试（2 个）
-shim_test.go    # Node.js 内建模块 shim 测试（14 个）
+asyncfunc_test.go             # SetGoAsyncFunc 单元测试（3 个）
+goja_test.go                  # goja/sobek 引擎单元测试（2 个）
+pack_rebuild_test.go          # pack 重建测试（需 UPDATE_TESTDATA=1）
+rebuild_testdata_test.go      # testdata 重建（需 UPDATE_TESTDATA=1）
+shim_test.go                  # Node.js 内建模块 shim 测试（14 个）
 
 integration/
+├── integration_test.go       # SSR + polyfill + BFF + pack + context + trace（56 个）
+├── images_test.go            # 图像 CDN 测试（11 个）
+├── bench_http_test.go        # HTTP 端到端 benchmark（6 个 Benchmark）
 └── testdata/
     └── example/
-        ├── bundle.mjs    # 预打包 IIFE bundle（从 examples/example 生成）
-        └── example.pack  # 预打包 pack（bundle.mjs + dist/）
+        ├── bundle.mjs        # 预打包 ESM（从 examples/example 生成）
+        └── example.pack      # 预打包 pack（bundle.bc + bundle-goja.mjs + dist/）
 ```
 
 `bundle.mjs` 和 `example.pack` 已提交到 git，
 直接 `go test ./...` 即可运行，无需 `pnpm build`。
+
+重新生成 testdata：
+```bash
+cd examples/example && pnpm install && pnpm build && cd ../..
+UPDATE_TESTDATA=1 go test -run TestRebuildTestdata -v -timeout 120s
+```
 
 ## 示例应用
 
@@ -91,7 +104,7 @@ TestGojaRequest
 
 ### Node.js 内建模块 Shim 测试（根模块）
 
-`shim_test.go` 验证每个 Node.js 内建模块的 ESM stub 能被 goja 正确加载和执行。
+`shim_test.go` 验证每个 Node.js 内建模块的 ESM stub 能被 QJS 正确加载和执行。
 
 | 测试 | 模块 |
 |---|---|
@@ -177,7 +190,7 @@ TestCartAPIEmpty
 TestCartSession
 ```
 **验证**：POST `/api/cart` 添加商品 → GET `/api/cart` 含 `Cereal` → GET `/cart` 页面含 `Cereal`。
-使用 size=1 的 Pool，保证所有请求打到同一 runtime（保留 in-memory session state）。
+使用 size=1 的 Pool，保证所有请求打到同一 QJS runtime（保留 in-memory session state）。
 
 ---
 
@@ -281,7 +294,7 @@ TestGetRandomValues
 
 #### TC-21：Polyfills 初始化 smoke test
 ```go
-TestPolyfillsInit
+TestPolyfillsQJSInit
 ```
 **验证**：最小 bundle 创建 Pool（size=2）不报错，即 polyfills 正确加载
 
@@ -702,7 +715,7 @@ TestSetAsyncFuncTiming
 
 ### 问题一：`renderToReadableStream` 静默失败
 
-**根因**：`isNode = false`，Astro 走 `renderToReadableStream` → 调用 `setTimeout`（goja 无内置），错误被 ReadableStream 吞掉。
+**根因**：QJS 中 `isNode = false`，Astro 走 `renderToReadableStream` → 调用 `setTimeout`（QJS 无内置），错误被 ReadableStream 吞掉。
 
 **修复**：`Symbol.toStringTag = 'process'` 使 `isNode = true`，走 `renderToAsyncIterable` 路径。
 
@@ -760,8 +773,8 @@ session driver 的加载代码有 try/catch 保护，运行时优雅降级。
 
 ---
 
-### 问题八：pack 加载失败（missing bundle.mjs）
+### 问题八：`ReferenceError: could not load module filename 'entry.mjs'`
 
-**根因**：`example.pack` 格式不匹配，缺少 `bundle.mjs`（旧 QJS pack 格式仅含 `bundle.bc`）。
+**根因**：`example.pack` 中的 `bundle.bc` 由旧版 QJS WASM 二进制编译，新版无法识别字节码格式，bootstrap 的 `import * from 'entry.mjs'` 找不到模块。
 
-**修复**：重新用 `astro-runtime build --pack` 生成 goja 格式的 pack 文件。
+**修复**：`UPDATE_TESTDATA=1 go test -run TestRebuildTestdata` 用当前二进制重新编译字节码并写回 pack。

@@ -1,6 +1,6 @@
 # astro-runtime 文档索引
 
-用于网站模板 SSR + BFF Render 的 Go + goja 运行时。
+用于网站模板 SSR + BFF Render 的 Go + QuickJS 运行时。
 在不依赖任何云平台 CLI 的情况下，本地或服务端直接运行 `@astrojs/netlify` 适配器编译的 Astro SSR 函数。
 
 ## 文档列表
@@ -41,14 +41,16 @@ go build -o astro-runtime ./cmd
 ### `build` — 打包 Astro SSR 产物
 
 ```bash
-astro-runtime build [--pack] [--entry path] [--dist dir] [--out path]
+astro-runtime build [--plain | --bytecode | --pack] [--entry path] [--dist dir] [--out path]
 ```
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--entry` | `.netlify/build/entry.mjs` | SSR entry 路径（先 `astro build`） |
 | `--dist` | `dist` | 静态输出目录（`--pack` 时打包进去） |
-| `--pack` | — | 输出部署包（`.pack`，含 bundle.mjs + dist/） |
+| `--plain` | — | 输出自包含 JS bundle（`.mjs`） |
+| `--bytecode` | — | 输出 QuickJS 字节码（`.bc`） |
+| `--pack` | — | 输出部署包（`.pack`，含 bundle.mjs + bundle.bc + dist/） |
 | `--out` | 依模式而定 | 输出路径 |
 
 ### `serve` — 启动 SSR 服务
@@ -106,10 +108,13 @@ pnpm build
 ```go
 import astroruntime "github.com/dxkite/astro-runtime"
 
-// 1. 从 entry.mjs 打包（esbuild）
+// 1. 从 entry.mjs 打包（esbuild + QJS 字节码）
 jsCode, err := astroruntime.BundleSSR("/path/to/entry.mjs")
 
-// 2. 打包为 .pack（bundle.mjs + dist/）
+// 2. 编译字节码
+bc, err := astroruntime.CompileBundleBytecode(jsCode)
+
+// 3. 打包为 .pack（bundle.mjs + bundle.bc + dist/）
 err = astroruntime.BuildPack("out.pack", jsCode, "/path/to/dist")
 ```
 

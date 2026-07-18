@@ -1,0 +1,15 @@
+services:
+  tanstack:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command:
+      - serve
+      - --bundle
+      - /data/bundle.mjs
+      - --port
+      - "8080"
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./bundle.mjs:/data/bundle.mjs:ro

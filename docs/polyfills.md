@@ -1,6 +1,6 @@
 # Polyfill 详解
 
-goja/sobek 缺少大量浏览器/Node.js API。
+QuickJS-NG（通过 wazero 运行）缺少大量浏览器/Node.js API。
 本文档列出每个 polyfill 的存在原因、覆盖边界和已知局限。
 
 ## 评估顺序
@@ -98,7 +98,7 @@ Astro 的 `applyPolyfills()` 在 bundle 初始化时检查 `if (!globalThis.cryp
 
 ### Blob
 
-goja 无内置 Blob。实现：
+QJS 无内置 Blob。实现：
 ```javascript
 class Blob {
     constructor(parts, opts) { this._parts = parts || []; ... }
@@ -143,7 +143,7 @@ globalThis.setTimeout = function(fn, delay) {
 ```
 
 - 仅用 microtask 实现"延迟"，不是真正的宏任务调度
-- 非零 delay 同样立即执行（goja 无 OS 定时器，SSR 中 delay 值通常无意义）
+- 非零 delay 同样立即执行（QJS 无 OS 定时器，SSR 中 delay 值通常无意义）
 
 ### queueMicrotask
 
@@ -173,7 +173,7 @@ web-streams-polyfill 内部用到此 API。
 
 ## 5. intlStub（js/intl.js）
 
-goja/sobek 不包含 ECMA-402（Internationalization API）。
+QuickJS-NG 不包含 ECMA-402（Internationalization API）。
 Astro 的日志模块和某些日期格式化路径调用 `new Intl.DateTimeFormat()`。
 
 | API | 实现 |
@@ -190,7 +190,7 @@ locale 参数被接受但忽略，不支持本地化格式。
 
 ## 6. structuredCloneGuard（js/structured-clone.js）
 
-goja/sobek 已内置 `structuredClone`，此处仅为 fallback。
+QuickJS-NG 已内置 `structuredClone`，此处仅为 fallback。
 JSON 往返实现不支持循环引用、`Date`、`Map`、`Set`、`RegExp` 等特殊类型。
 
 ---
@@ -205,7 +205,7 @@ if (a instanceof Error || (a && typeof a.message === 'string' && typeof a.stack 
 }
 ```
 
-**为何需要特殊处理**：goja 中 Error 的 `message` 和 `stack` 属性为不可枚举，
+**为何需要特殊处理**：QuickJS 中 Error 的 `message` 和 `stack` 属性为不可枚举，
 `JSON.stringify(error)` 返回 `{}`，错误信息完全丢失。
 
 ### 输出格式
@@ -250,7 +250,7 @@ globalThis.fetch(input, init)
 |---|---|
 | `WebSocket` | SSR 路径不需要 |
 | `EventSource` | SSR 路径不需要 |
-| `Worker` | goja 无线程 |
+| `Worker` | QJS 无线程 |
 | `IndexedDB` / `localStorage` | SSR 路径不需要 |
 | `Canvas` / `WebGL` | SSR 路径不需要 |
 | `Intl` 本地化格式 | stub 忽略 locale |

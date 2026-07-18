@@ -1,4 +1,21 @@
 services:
+  astro-runtime-qjs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "18081:8080"
+    volumes:
+      - ./integration/testdata/example/example.pack:/data/bundle.pack:ro
+      - bench-astro-qjs-cache:/cache
+    command: ["serve", "--pack", "/data/bundle.pack", "--port", "8080", "--cache-dir", "/cache", "--engine", "qjs"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
   astro-runtime-goja:
     build:
       context: .
@@ -34,3 +51,5 @@ services:
       retries: 15
       start_period: 15s
 
+volumes:
+  bench-astro-qjs-cache:

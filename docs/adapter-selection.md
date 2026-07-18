@@ -29,7 +29,7 @@ Go BFF 服务（处理业务逻辑、鉴权、数据聚合）
 astro-runtime（Pool.Get → HandleSSR）
   │
   ▼
-goja 运行时（Astro SSR bundle）
+QJS 运行时（Astro SSR bundle）
   │
   ▼
 HTML 字符串（注入到 BFF 响应中）
@@ -63,7 +63,7 @@ Astro 通过 **适配器（Adapter）** 决定 SSR 的输出格式。不同适�
 所有第三方依赖已内联，无需 `node_modules`。
 
 对比 `@astrojs/node`：产物是 ESM 模块树，依赖 `fs`、`stream`、`child_process`、`http` 等 Node 内置模块。
-在 goja 中模拟完整 Node.js 内置模块不现实，而 Netlify 适配器只依赖 **Web Platform API**（已由 polyfills 覆盖）。
+在 QuickJS 中模拟完整 Node.js 内置模块不现实，而 Netlify 适配器只依赖 **Web Platform API**（已由 polyfills 覆盖）。
 
 ### 2. 标准 Web API 接口
 
@@ -76,13 +76,13 @@ async function handler(
 ): Promise<Response>   // Web API Response
 ```
 
-`Request` / `Response` 是浏览器规范定义的标准类型，在 goja 中可完整 polyfill，
+`Request` / `Response` 是浏览器规范定义的标准类型，在 QJS 中可完整 polyfill，
 而无需模拟 `http.IncomingMessage` / `http.ServerResponse` 等 Node.js 特有类型。
 
 ### 3. 产物稳定，esbuild 可独立再打包
 
 Netlify 适配器的产物已经是 esbuild 打包的结果，但 entry 仍是 `.mjs` 格式（有 `import.meta`）。
-本项目在运行时用 esbuild 再次打包为 IIFE 格式并降级到 ES2017，使 goja 可以一次完成加载。
+本项目在运行时用 esbuild 再次打包为纯 CJS，消除所有 ESM 语法，使 QJS 可以 `ctx.Eval` 一次完成加载。
 
 ### 4. Netlify Context 可低成本 mock
 
@@ -100,7 +100,7 @@ Netlify 适配器的产物已经是 esbuild 打包的结果，但 entry 仍是 `
 
 ---
 
-## 运行时架构选择：Go + goja
+## 运行时架构选择：Go + QuickJS
 
 ### 为何不用 Node.js 子进程
 
@@ -109,35 +109,22 @@ Netlify 适配器的产物已经是 esbuild 打包的结果，但 entry 仍是 `
 - 对宿主机 Node.js 版本的依赖（模板使用者可能没有 Node）
 - 进程崩溃传播、信号处理等复杂性
 
-### 为何选择 goja/sobek
+### 为何选择 QuickJS（via wazero）
 
-| 属性 | goja/sobek | QuickJS (已移除) | V8 |
-|---|---|---|---|
-| ES 规范支持 | ES2020+（async/await）| ES2023（QuickJS-NG） | ES2023+ |
-| 无 CGO | ✅ 纯 Go | ✅（via wazero WASM）| ❌（需要 CGO） |
-| 单文件二进制 | ✅ | ✅ | ❌（需要动态库） |
-| 内存占用 | 低（约 90 KB/请求） | 高（约 1.7 MB/请求） | — |
-| 执行速度 | 3× 快于 QJS | 基准 | JIT，更快 |
-| 并发 I/O | ✅ 原生 goroutine | 需要跨 WASM 边界 | — |
+| 属性 | QuickJS (qjs) | V8 (goja / otto) |
+|---|---|---|
+| ES 规范支持 | ES2023（QuickJS-NG） | ES5（otto）/ ES2020（goja） |
+| 异步（async/await） | ✅ 原生支持 | ❌（otto）/ 部分（goja） |
+| 无 CGO | ✅（via wazero WASM） | ❌（V8 binding 需要 CGO） |
+| 单文件二进制 | ✅ | ❌（V8 需要动态库） |
+| 性能 | 中等 | 中等 |
 
-**选择 goja 的原因**（benchmark 数据见 [benchmark.md](./benchmark.md)）：
-
-- **内存效率**：每次请求内存分配约 90 KB vs QuickJS 的 1.7 MB（19× 更少），低内存压力下 Pool 可配置更大
-- **执行速度**：相同工作负载下比 QuickJS bytecode 解释器快 3×（76,588 ns vs 231,741 ns/op）
-- **响应延迟**：goja 端到端延迟 ~78ms vs QJS ~103ms；QJS 的 WASM 边界 I/O（response.write 67ms vs 10ms）抵消了 js.eval 优势
-- **并发稳定性**：goja 使用原生 Go goroutine，无 WASM 单线程约束；QuickJS 在并发模式下存在已知 Await() hang 问题
-- **二进制体积**：移除 wazero + QuickJS WASM 后二进制更小，部署更轻量
-
-### QuickJS 移除历史
-
-早期版本同时支持 QuickJS（`-tags qjs`）和 goja 双引擎：
-- QJS 作为默认引擎（启动时字节码缓存，冷启动 ~5ms vs goja ~1ms）
-- goja 作为轻量备选（执行快 3×，内存少 19×）
-
-**移除原因**：综合 benchmark 评估后，goja 在实际 Astro 应用中各维度综合优于 QJS：
-执行速度更快、内存更低、I/O 延迟更低、无 WASM 并发问题。
-QJS 的字节码缓存优势（更快冷启动）不足以弥补运行时劣势。
-移除 QJS 依赖（`dxkite/qjs` + `tetratelabs/wazero`）同时减小了二进制体积和维护负担。
+`dxkite/qjs`（QuickJS-NG via wazero）满足所有要求：
+- 纯 Go，无 CGO，单二进制分发
+- 完整 ES2023 + async/await 支持（Astro bundle 大量使用）
+- Pool 模型天然支持并发（每个 runtime 独立 JS heap）
+- 增加 `pendingCallbacks` channel、`SetGoAsyncFunc` / `RunAsync` 实现并发 fetch，
+  同时保持 wazero 的单线程约束
 
 ### Pool 模型与 BFF Render
 

@@ -13,10 +13,10 @@
 | OS | macOS Darwin 25.4.0 |
 | Go | 1.25.0 |
 | Node.js | v24.14.1 |
+| JS 引擎 QJS | github.com/dxkite/qjs（QuickJS/WASM bytecode） |
 | JS 引擎 goja | github.com/grafana/sobek（goja Grafana fork，纯 Go） |
 | 测试应用 | `examples/example`：商品列表、JSON API、动态路由（完整功能示例） |
 | 更新日期 | 2026-06-29 |
-| 备注 | QJS 引擎已于 2026-06-29 移除，下文历史数据供引擎选型参考 |
 
 ### 测试方式
 
@@ -31,10 +31,11 @@
 
 ### 命令
 
-> **注**：下方 QJS 相关 benchmark 测试文件已随引擎删除。数据为历史记录，仅供选型参考。
-
 ```bash
-# goja 引擎单元测试
+# HTTP 端到端（integration/）
+go test -run=^$ -bench=BenchmarkHTTP -benchtime=5s -count=1 ./integration/
+
+# 引擎单元对比（根模块）
 go test -run=^$ -bench=. -benchtime=3s -count=1 .
 ```
 
@@ -98,7 +99,7 @@ goja 无需 WASM 初始化，也不进行字节码编译，冷启动显著更快
 **关键结论**：
 - **执行速度**：goja 比 QJS 快 **3.0×**（相同轻量工作负载）
 - **内存分配**：goja 每次请求分配 **19× 更少字节**（无需序列化到 WASM 内存）
-- **引擎选择**：goja 在速度、内存、端到端延迟上全面优于 QJS（已移除），当前版本统一使用 goja
+- **引擎选择**：追求极低延迟和低内存的简单 SSR handler 选 goja；需要运行完整 Astro 复杂应用（`for-await`、动态路由等）选 QJS
 
 ---
 
@@ -205,18 +206,18 @@ docker compose -f docker-compose.bench.yml -p astro-bench down
 
 ## 引擎选型速查
 
-> **当前版本统一使用 goja**，QJS 已移除。下表为历史对比，说明选型依据。
-
 | 场景 | 推荐引擎 | 原因 |
 |---|---|---|
-| 真实 Astro 应用 | **goja** | 两步打包（ESM→IIFE + ES2017 降级）支持完整 Astro 应用；3× 快于 QJS，内存少 19× |
-| 高并发复杂渲染 | **goja pool** | Go 并发池 + 低 I/O 延迟；QJS 的 WASM 边界开销使端到端延迟反而更高 |
+| 需要运行真实 Astro 应用 | **QJS 或 goja** | goja 通过两步打包（ESM→IIFE + ES2017 降级）支持完整 Astro 应用 |
+| 最高吞吐轻量 handler | **goja** | 3× 更快，19× 更少内存，4.7× 更快冷启动 |
+| 高并发复杂渲染（outbound fetch + HTML） | **QJS pool** | Go 并发池在 c=32 时超越 Node.js 单线程 |
 | 极低延迟简单 API | **Node.js V8** | JIT 编译，轻计算场景 5～7× 更快 |
-| 最小镜像体积 | **astro-runtime** | goja ~42 MB（移除 WASM 后更小）；Node.js 228 MB |
+| 最小镜像体积 | **astro-runtime** | QJS/goja 均 ~42 MB；Node.js 228 MB |
 
-> **goja 打包策略**：先生成自包含 ESM bundle（支持 top-level await），
+> **goja 打包策略**：goja 引擎使用两步打包流程：先生成自包含 ESM bundle（支持 top-level await），
 > 再转为 IIFE 并降级到 ES2017（将 `for-await-of`、`async function*` 转换为 Promise 链）。
 > 动态 `import()` 调用被替换为返回 rejected Promise 的存根（不影响 SSR 主路径）。
+> 实际 Astro 应用（如 koharu）在 goja 模式下已验证正常运行。
 
 ---
 
@@ -235,7 +236,7 @@ docker compose -f docker-compose.bench.yml -p astro-bench down
 |---|---|
 | alpine base | 10.2 MB |
 | `ca-certificates` + `tzdata` | 3.3 MB |
-| `astro-runtime` 静态二进制（sobek） | 17.6 MB |
+| `astro-runtime` 静态二进制（含 QuickJS WASM + sobek） | 17.6 MB |
 | **合计** | **~31 MB** |
 
 **node-ssr**（`node:24-alpine`）：
@@ -259,7 +260,8 @@ docker compose -f docker-compose.bench.yml -p astro-bench down
 | 空载（无请求） | 124.8 MiB | 135.4 MiB |
 | 压测中（c=32） | 213 MiB | 197 MiB |
 
-> astro-runtime 压测时内存略高，因为 pool size=8 每个 goja runtime 持有独立 JS 堆。
+> astro-runtime 压测时内存略高，因为 pool size=8 每个 QJS Runtime 持有独立 JS 堆和字节码缓存。
+> goja 池内存分配是 QJS 的 1/19，压测内存更低。
 
 ### 进程 / 线程数
 
@@ -287,20 +289,24 @@ docker compose -f docker-compose.bench.yml -p astro-bench down
 ## 复现方法
 
 ```bash
-# goja 引擎单元对比（pool 初始化 + 请求吞吐）
+# HTTP benchmark（三引擎对比）
+go test -run=^$ -bench=BenchmarkHTTP -benchtime=5s -count=1 ./integration/
+
+# 引擎单元对比（pool 初始化 + 请求吞吐）
 go test -run=^$ -bench=. -benchtime=3s -count=1 .
 
-# Docker 对比（goja vs Node.js）
-./benchmark/docker_bench.sh --skip-node  # 只测 goja
+# Docker 三引擎对比（需先 pnpm build 并 UPDATE_TESTDATA=1 重建 pack）
 ./benchmark/docker_bench.sh
+./benchmark/docker_bench.sh --skip-node   # 只测 QJS vs goja
 ```
 
 ### 相关文件
 
 | 文件 | 说明 |
 |---|---|
-| `bench_fuwari_test.go` | Fuwari 应用 goja benchmark |
+| `bench_test.go` | Pool 初始化 + SSR 请求单元 benchmark |
+| `integration/bench_http_test.go` | HTTP 端到端 benchmark（QJS / goja / Node.js） |
 | `benchmark/node_server.mjs` | Node.js HTTP 服务，包装 Netlify adapter |
 | `benchmark/Dockerfile.node` | node-ssr Docker 镜像定义 |
-| `benchmark/docker_bench.sh` | Docker benchmark 编排脚本 |
-| `docker-compose.bench.yml` | goja / Node.js 服务 compose 定义 |
+| `benchmark/docker_bench.sh` | Docker benchmark 编排脚本（支持 --skip-goja / --skip-node） |
+| `docker-compose.bench.yml` | QJS / goja / Node.js 三服务 compose 定义 |

@@ -13,8 +13,8 @@ import (
 	"github.com/dxkite/astro-runtime/trace"
 )
 
-//go:embed bootstrap-goja.js
-var bootstrapGojaJS string
+//go:embed bootstrap-astro.js
+var bootstrapAstroJS string
 
 // StreamCallbacks carries the Go-side streaming callbacks registered as JS host functions.
 // Pool creates these to write ResponseSignal values to the per-request channel.
@@ -26,14 +26,26 @@ type StreamCallbacks struct {
 
 // SetupOptions configures a single JS runtime initialization.
 type SetupOptions struct {
-	Bundle []byte            // goja: ESM bundle source
-	Env    map[string]string
-	Stream StreamCallbacks
+	BCS           *BytecodeSet      // nil = goja source path
+	Bundle        []byte            // goja: ESM bundle source
+	Env           map[string]string
+	Stream        StreamCallbacks
+	Bootstrap string // custom bootstrap source; "" = use built-in astro bootstrap
+	Polyfill  string // custom polyfill source; when non-empty, replaces all built-in polyfills
+	SelfURL   string // internal base URL (e.g. http://127.0.0.1:8080); used by fetch.js for relative URL resolution
+}
+
+// resolveBootstrap returns the bootstrap JS source to use for the given options.
+func resolveBootstrap(opts SetupOptions) string {
+	if opts.Bootstrap != "" {
+		return opts.Bootstrap
+	}
+	return bootstrapAstroJS
 }
 
 // SetupRuntime initializes a single JS runtime.
 // Order: host functions → stream callbacks → polyfills → bundle → bootstrap.
-func SetupRuntime(ctx JSContext, opts SetupOptions) error {
+func SetupRuntime(ctx JSContext, opts SetupOptions, engine JSEngine) error {
 	keyReg := make(map[string]*cryptoKey)
 
 	if err := injectHostFunctions(ctx, opts.Env, keyReg); err != nil {
@@ -85,9 +97,21 @@ func SetupRuntime(ctx JSContext, opts SetupOptions) error {
 		return nil, nil
 	})
 
-	for _, step := range polyfillSources() {
-		if err := ctx.Eval(step.name, step.src, EvalScript); err != nil {
-			return fmt.Errorf("polyfill %s: %w", step.name, err)
+	if opts.SelfURL != "" {
+		src := fmt.Sprintf("globalThis.__go_self_origin=%q;", opts.SelfURL)
+		if err := ctx.Eval("self-origin.js", src, EvalScript); err != nil {
+			return fmt.Errorf("self-origin: %w", err)
+		}
+	}
+	if opts.Polyfill != "" {
+		if err := ctx.Eval("polyfill.js", opts.Polyfill, EvalScript); err != nil {
+			return fmt.Errorf("polyfill: %w", err)
+		}
+	} else {
+		for _, step := range polyfillSources() {
+			if err := ctx.Eval(step.name, step.src, EvalScript); err != nil {
+				return fmt.Errorf("polyfill %s: %w", step.name, err)
+			}
 		}
 	}
 	if len(opts.Bundle) > 0 {
@@ -95,7 +119,7 @@ func SetupRuntime(ctx JSContext, opts SetupOptions) error {
 			return fmt.Errorf("bundle eval: %w", err)
 		}
 	}
-	if err := ctx.Eval("bootstrap.js", bootstrapGojaJS, EvalScript); err != nil {
+	if err := ctx.Eval("bootstrap.js", resolveBootstrap(opts), EvalScript); err != nil {
 		return fmt.Errorf("bootstrap eval: %w", err)
 	}
 

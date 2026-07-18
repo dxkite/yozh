@@ -1,6 +1,10 @@
 # Exclude generated/vendored test artifacts from GitHub language statistics
 integration/testdata/** linguist-vendored
 
-# Exclude generated artifacts from git archive (*.pack, *.mjs)
-*.pack export-ignore
-integration/testdata/** export-ignore
+# Exclude generated artifacts from git archive
+*.pack         export-ignore
+*.mjs          export-ignore
+.claude/**     export-ignore
+examples/**/pnpm-lock.yaml export-ignore
+examples/**/node_modules   export-ignore
+integration/testdata/**    export-ignore

@@ -92,7 +92,7 @@ if (typeof _rawFactory === 'function' && _rawFactory.length < 2) {
     var context = buildNetlifyContext(rawCtx);
     _tend(_t);
 
-    _t = _tstart('ssr');
+    _t = _tstart('ssr-handler');
     var response;
     try {
       response = await __ssrHandler(request, context);
@@ -113,55 +113,34 @@ if (typeof _rawFactory === 'function' && _rawFactory.length < 2) {
     }
     _tend(_t);
 
-    _t = _tstart('resp');
+    _t = _tstart('stream-response');
+    __go_sendHeaders(response.status, JSON.stringify(respHeaders));
+
     var b = response._body;
-    if (b != null && typeof b.getReader === 'function') {
-      // Stream path: ReadableStream — send headers immediately, stream each chunk.
-      __go_sendHeaders(response.status, JSON.stringify(respHeaders));
-      var reader = b.getReader();
-      while (true) {
-        var _r = await reader.read();
-        if (_r.done) break;
-        var _c = _r.value;
-        if (_c && _c.length > 0)
-          __go_sendChunk(typeof _c === 'string' ? _enc.encode(_c).buffer : _c.buffer);
-      }
-      _tend(_t);
-    } else if (b != null && b[Symbol.asyncIterator] != null) {
-      // Buffer path: AsyncIterator (Astro renderToAsyncIterable) — collect all chunks in JS,
-      // then send one __go_sendChunk with Content-Length and complete Server-Timing in initial headers.
-      var _chunks = [];
-      var _iter = b[Symbol.asyncIterator]();
-      while (true) {
-        var _r = await _iter.next();
-        if (_r.done) break;
-        var _c = _r.value;
-        if (_c && _c.length > 0)
-          _chunks.push(typeof _c === 'string' ? _enc.encode(_c) : _c);
-      }
-      _tend(_t); // all chunks collected; stream-response span complete; _spans has all checkpoints
-      var _total = 0;
-      for (var _i = 0; _i < _chunks.length; _i++) _total += _chunks[_i].byteLength;
-      var _full = new Uint8Array(_total);
-      var _off = 0;
-      for (var _i = 0; _i < _chunks.length; _i++) { _full.set(_chunks[_i], _off); _off += _chunks[_i].byteLength; }
-      var _jsTiming = _spans.filter(function(s) { return s.name === 'ssr' || s.name === 'resp'; }).map(function(s) { return s.name + ';dur=' + (s.e - s.s); }).join(', ');
-      respHeaders.push(['content-length', String(_total)]);
-      if (_jsTiming) respHeaders.push(['server-timing', _jsTiming]);
-      __go_sendHeaders(response.status, JSON.stringify(respHeaders));
-      if (_total > 0) __go_sendChunk(_full.buffer);
-    } else {
-      // String or null body.
-      _tend(_t);
-      if (typeof b === 'string' && b.length > 0) {
-        var _encoded = _enc.encode(b);
-        respHeaders.push(['content-length', String(_encoded.byteLength)]);
-        __go_sendHeaders(response.status, JSON.stringify(respHeaders));
-        __go_sendChunk(_encoded.buffer);
-      } else {
-        __go_sendHeaders(response.status, JSON.stringify(respHeaders));
+    if (b != null) {
+      if (typeof b.getReader === 'function') {
+        var reader = b.getReader();
+        while (true) {
+          var _r = await reader.read();
+          if (_r.done) break;
+          var _c = _r.value;
+          if (_c && _c.length > 0)
+            __go_sendChunk(typeof _c === 'string' ? _enc.encode(_c).buffer : _c.buffer);
+        }
+      } else if (b[Symbol.asyncIterator] != null) {
+        var _iter = b[Symbol.asyncIterator]();
+        while (true) {
+          var _r = await _iter.next();
+          if (_r.done) break;
+          var _c = _r.value;
+          if (_c && _c.length > 0)
+            __go_sendChunk(typeof _c === 'string' ? _enc.encode(_c).buffer : _c.buffer);
+        }
+      } else if (typeof b === 'string' && b.length > 0) {
+        __go_sendChunk(_enc.encode(b).buffer);
       }
     }
+    _tend(_t);
 
     __go_endStream(JSON.stringify(_spans));
     return null;

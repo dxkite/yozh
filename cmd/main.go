@@ -30,30 +30,66 @@ func main() {
 // ── build ─────────────────────────────────────────────────────────────────────
 
 func buildCmd() *cobra.Command {
-	var entry, out, distDir string
+	var entry, out, distDir, engine, kind string
 	var pack bool
 
 	cmd := &cobra.Command{
 		Use:   "build",
-		Short: "Bundle Astro SSR output into bundle.mjs (goja) or --pack",
-		Long: `Bundle the Astro SSR entry into a deployable artifact.
+		Short: "Bundle SSR entry into bundle.mjs (goja) or --pack",
+		Long: `Bundle the SSR entry into a deployable artifact.
 
-Default: outputs bundle.mjs (goja-format ESM).
+Default (--kind astro): bundles Netlify SSR entry.mjs with node/CJS-first conditions.
+With --kind react:    bundles JSX/TSX entry with browser conditions + JSX transform.
 
-With --pack the output is a .pack zip (bundle.mjs + dist/).`,
+Default output: bundle.mjs (goja-format ESM).
+With --pack:    engine-specific .pack zip (bundle + dist/).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			absEntry, err := filepath.Abs(entry)
 			if err != nil {
 				return fmt.Errorf("resolve --entry: %w", err)
 			}
 			if _, err := os.Stat(absEntry); os.IsNotExist(err) {
-				return fmt.Errorf("entry not found: %s\n(run `astro build` first)", absEntry)
+				return fmt.Errorf("entry not found: %s", absEntry)
 			}
 
 			start := time.Now()
 			log.Printf("[build] entry: %s", absEntry)
 
-			// Bundle entry.mjs → self-contained ESM (source for all output formats).
+			if kind == "react" {
+				// React 18: JSX + browser conditions → goja-wrapped ESM in one step.
+				log.Printf("[build] bundling react ...")
+				gojaCode, err := astroruntime.BundleSSRReact(absEntry)
+				if err != nil {
+					return fmt.Errorf("esbuild react: %w", err)
+				}
+				log.Printf("[build] react bundle: %d KB", len(gojaCode)/1024)
+				if pack {
+					outPath := resolveOut(out, ".netlify/build/bundle.pack")
+					absDist, _ := filepath.Abs(distDir)
+					if err := astroruntime.BuildPackFromGoja(outPath, gojaCode, absDist); err != nil {
+						return fmt.Errorf("pack: %w", err)
+					}
+					fi, _ := os.Stat(outPath)
+					logDone(start, int(fi.Size())/1024, outPath)
+				} else {
+					outPath := resolveOut(out, ".netlify/build/bundle.mjs")
+					if err := writeOut(outPath, gojaCode); err != nil {
+						return err
+					}
+					logDone(start, len(gojaCode)/1024, outPath)
+				}
+				return nil
+			}
+
+			// Default: Astro/Netlify SSR path.
+			engineKind := astroruntime.EngineGoja
+			if engine == "qjs" {
+				engineKind = astroruntime.EngineQJS
+			}
+			if err := astroruntime.ValidateEngineKind(engineKind); err != nil {
+				return err
+			}
+
 			jsCode, err := astroruntime.BundleSSR(absEntry)
 			if err != nil {
 				return fmt.Errorf("esbuild: %w", err)
@@ -63,14 +99,13 @@ With --pack the output is a .pack zip (bundle.mjs + dist/).`,
 			if pack {
 				outPath := resolveOut(out, ".netlify/build/bundle.pack")
 				absDist, _ := filepath.Abs(distDir)
-				log.Printf("[build] packing ...")
-				if err := astroruntime.BuildPack(outPath, jsCode, absDist); err != nil {
+				log.Printf("[build] packing (%s) ...", engine)
+				if err := astroruntime.BuildPack(outPath, jsCode, absDist, engineKind); err != nil {
 					return fmt.Errorf("pack: %w", err)
 				}
 				fi, _ := os.Stat(outPath)
 				logDone(start, int(fi.Size())/1024, outPath)
 			} else {
-				// Default: goja-format bundle.mjs.
 				outPath := resolveOut(out, ".netlify/build/bundle.mjs")
 				log.Printf("[build] converting for goja ...")
 				gojaCode, err := astroruntime.ConvertBundleForGoja(jsCode)
@@ -86,8 +121,10 @@ With --pack the output is a .pack zip (bundle.mjs + dist/).`,
 		},
 	}
 
-	cmd.Flags().StringVar(&entry, "entry", ".netlify/build/entry.mjs", "path to SSR entry .mjs")
-	cmd.Flags().BoolVar(&pack, "pack", false, "output a deployable .pack (bundle.mjs + dist/)")
+	cmd.Flags().StringVar(&entry, "entry", ".netlify/build/entry.mjs", "path to SSR entry (.mjs for astro, .jsx/.tsx for react)")
+	cmd.Flags().StringVar(&kind, "kind", "astro", "entry kind: astro (Netlify SSR) or react (JSX with browser conditions)")
+	cmd.Flags().BoolVar(&pack, "pack", false, "output a deployable .pack (bundle + dist/)")
+	cmd.Flags().StringVar(&engine, "engine", "goja", "engine for --pack: goja (bundle.mjs) or qjs (bundle.bc, requires -tags qjs)")
 	cmd.Flags().StringVar(&out, "out", "", "output path (default: .netlify/build/bundle.mjs, or bundle.pack with --pack)")
 	cmd.Flags().StringVar(&distDir, "dist", "dist", "static output directory (only used with --pack)")
 
@@ -105,7 +142,7 @@ func defaultCacheDir() string {
 }
 
 func serveCmd() *cobra.Command {
-	var packPath, entry, bundle, distDir, cacheDir string
+	var packPath, entry, bundle, distDir, cacheDir, engine, bootstrapFile, polyfillFile string
 	var port, packCacheSize int
 
 	cmd := &cobra.Command{
@@ -131,8 +168,44 @@ func serveCmd() *cobra.Command {
 			ctx := cmd.Context()
 			addr := fmt.Sprintf(":%d", port)
 
+			engineKind := astroruntime.EngineGoja
+			if engine == "qjs" {
+				engineKind = astroruntime.EngineQJS
+			}
+			if err := astroruntime.ValidateEngineKind(engineKind); err != nil {
+				return err
+			}
+
+			// --bootstrap overrides default; read file once and pass source.
+			var bsSrc string
+			if bootstrapFile != "" {
+				absBS, err := filepath.Abs(bootstrapFile)
+				if err != nil {
+					return fmt.Errorf("resolve --bootstrap: %w", err)
+				}
+				data, err := os.ReadFile(absBS)
+				if err != nil {
+					return fmt.Errorf("read --bootstrap: %w", err)
+				}
+				bsSrc = string(data)
+			}
+
+			// --polyfill replaces all built-in polyfills; read file once and pass source.
+			var polyfillSrc string
+			if polyfillFile != "" {
+				absPolyfill, err := filepath.Abs(polyfillFile)
+				if err != nil {
+					return fmt.Errorf("resolve --polyfill: %w", err)
+				}
+				data, err := os.ReadFile(absPolyfill)
+				if err != nil {
+					return fmt.Errorf("read --polyfill: %w", err)
+				}
+				polyfillSrc = string(data)
+			}
+
 			if packPath != "" {
-				return serveFromPack(ctx, packPath, addr, cacheDir, packCacheSize)
+				return serveFromPack(ctx, packPath, addr, cacheDir, packCacheSize, port, engineKind, bsSrc, polyfillSrc)
 			}
 
 			absDist, err := filepath.Abs(distDir)
@@ -162,8 +235,13 @@ func serveCmd() *cobra.Command {
 				if _, err := os.Stat(absEntry); os.IsNotExist(err) {
 					return fmt.Errorf("entry not found: %s\n(run `astro build` first)", absEntry)
 				}
-				slog.InfoContext(ctx, "bundling entry", "path", absEntry)
-				jsCode, err = astroruntime.BundleSSRGoja(absEntry)
+				slog.InfoContext(ctx, "bundling entry", "path", absEntry, "engine", string(engineKind))
+				switch {
+				case engineKind == astroruntime.EngineGoja:
+					jsCode, err = astroruntime.BundleSSRGoja(absEntry)
+				default:
+					jsCode, err = astroruntime.BundleSSR(absEntry)
+				}
 				if err != nil {
 					return fmt.Errorf("bundle: %w", err)
 				}
@@ -175,6 +253,10 @@ func serveCmd() *cobra.Command {
 				astroruntime.WithCacheDir(cacheDir),
 				astroruntime.WithPoolOptions(
 					astroruntime.WithEnv(envMap()),
+					astroruntime.WithEngineKind(engineKind),
+					astroruntime.WithBootstrap(bsSrc),
+					astroruntime.WithPolyfill(polyfillSrc),
+					astroruntime.WithSelfURL(fmt.Sprintf("http://127.0.0.1:%d", port)),
 				),
 			)
 			if err != nil {
@@ -182,19 +264,22 @@ func serveCmd() *cobra.Command {
 			}
 			defer rt.Close()
 
-			slog.InfoContext(ctx, "pool ready")
+			slog.InfoContext(ctx, "pool ready", "engine", string(engineKind))
 			slog.InfoContext(ctx, "server listening", "addr", "http://localhost"+addr, "dist", absDist)
 			return serveWithShutdown(ctx, rt, addr)
 		},
 	}
 
-	cmd.Flags().StringVar(&packPath, "pack", "", "path to .pack file (bundle.mjs + dist/)")
+	cmd.Flags().StringVar(&packPath, "pack", "", "path to .pack file (bundle.bc + dist/)")
 	cmd.Flags().StringVar(&entry, "entry", "", "path to SSR entry .mjs (bundled at startup)")
 	cmd.Flags().StringVar(&bundle, "bundle", "", "path to pre-bundled .mjs")
 	cmd.Flags().IntVar(&port, "port", 8888, "port to listen on")
 	cmd.Flags().StringVar(&distDir, "dist", "dist", "static output directory (not used with --pack)")
-	cmd.Flags().StringVar(&cacheDir, "cache-dir", defaultCacheDir(), "bundle cache directory (empty to disable)")
+	cmd.Flags().StringVar(&cacheDir, "cache-dir", defaultCacheDir(), "bundle bytecode cache directory (empty to disable)")
 	cmd.Flags().IntVar(&packCacheSize, "pack-cache-size", 0, "max extracted pack caches to keep (0 = default 3, negative = unlimited)")
+	cmd.Flags().StringVar(&engine, "engine", "goja", "JS engine: goja (default, pure-Go) or qjs (QuickJS/WASM, requires -tags qjs build)")
+	cmd.Flags().StringVar(&bootstrapFile, "bootstrap", "", "path to a custom bootstrap .js file")
+	cmd.Flags().StringVar(&polyfillFile, "polyfill", "", "path to a JS file that replaces all built-in polyfills")
 
 	cmd.MarkFlagsMutuallyExclusive("pack", "entry", "bundle")
 
@@ -202,7 +287,7 @@ func serveCmd() *cobra.Command {
 }
 
 // serveFromPack loads a .pack file and starts the server via the Runtime SDK.
-func serveFromPack(ctx context.Context, packPath, addr, cacheDir string, packCacheSize int) error {
+func serveFromPack(ctx context.Context, packPath, addr, cacheDir string, packCacheSize, port int, engineKind astroruntime.EngineKind, bsSrc, polyfillSrc string) error {
 	absPackPath, err := filepath.Abs(packPath)
 	if err != nil {
 		return fmt.Errorf("resolve --pack: %w", err)
@@ -217,6 +302,10 @@ func serveFromPack(ctx context.Context, packPath, addr, cacheDir string, packCac
 		astroruntime.WithPackCacheSize(packCacheSize),
 		astroruntime.WithPoolOptions(
 			astroruntime.WithEnv(envMap()),
+			astroruntime.WithEngineKind(engineKind),
+			astroruntime.WithBootstrap(bsSrc),
+			astroruntime.WithPolyfill(polyfillSrc),
+			astroruntime.WithSelfURL(fmt.Sprintf("http://127.0.0.1:%d", port)),
 		),
 	)
 	if err != nil {
@@ -224,7 +313,7 @@ func serveFromPack(ctx context.Context, packPath, addr, cacheDir string, packCac
 	}
 	defer rt.Close()
 
-	slog.InfoContext(ctx, "pool ready")
+	slog.InfoContext(ctx, "pool ready", "engine", string(engineKind))
 	slog.InfoContext(ctx, "server listening", "addr", "http://localhost"+addr, "pack", absPackPath)
 	return serveWithShutdown(ctx, rt, addr)
 }
