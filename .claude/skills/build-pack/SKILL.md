@@ -9,7 +9,7 @@ description: "打包产物管理：① 集成测试数据——将 examples/exam
 ## 概述
 
 - `bundle.mjs` — 自包含 JS bundle，供 `sharedPool` / `sessionPool` 使用
-- `example.pack` — 含 bundle.bc + dist/ 的部署包，供 `packRT` 和 Docker 容器使用
+- `example.pack` — 含 bundle.mjs（goja 格式）+ dist/ 的部署包，供 `packRT` 和 Docker 容器使用
 
 Windows 命令见 [windows-cmd.md](./windows-cmd.md)。
 
@@ -130,4 +130,4 @@ PACK_FILE=/tmp/koharu.pack PORT=8892 docker compose up -d --build
 - 修改 Astro 源码 → 重跑步骤 1+2；仅改 Go 源码 → 跳过步骤 1
 - `dist/` 仅打包进 `.pack`，不影响 `bundle.mjs`
 - `node-linker=hoisted` 是 pnpm 项目必要条件，esbuild 无法解析 pnpm 虚拟存储
-- `.pack` 包含 QuickJS bytecode，容器启动时读取 `/cache` 卷中的缓存，命中时跳过编译
+- `.pack` 包含 goja 格式的 bundle.mjs，容器启动时若配置了 `--cache-dir` 会复用 `/cache` 卷中已解压的 pack 目录，命中时跳过解压

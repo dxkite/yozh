@@ -79,8 +79,8 @@ func nodeShimCode(path string) string {
 	return `export default {};`
 }
 
-// BundleSSR bundles the Netlify SSR .mjs entry to a self-contained ESM bundle
-// suitable for the QJS engine.
+// BundleSSR bundles the Netlify SSR .mjs entry to a self-contained ESM bundle.
+// The output can be fed directly into ConvertBundleForGoja/BuildPack for the goja engine.
 //
 // Node.js built-in modules are replaced with lightweight ESM stubs via nodeShimPlugin.
 // Third-party packages are resolved normally from node_modules. The project must use

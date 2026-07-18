@@ -7,7 +7,7 @@ import (
 	"net/url"
 )
 
-// injectBinaryOps registers host functions for binary data transfer between Go and QJS.
+// injectBinaryOps registers host functions for binary data transfer between Go and JS.
 func injectBinaryOps(ctx JSContext) {
 	ctx.SetGoFunc("__go_textEncodeUTF8", func(_ context.Context, args ...any) (any, error) {
 		if len(args) == 0 {

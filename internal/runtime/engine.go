@@ -1,6 +1,9 @@
 package jsruntime
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // GoFunc is the host-function signature for both sync and async bridging.
 type GoFunc func(ctx context.Context, args ...any) (any, error)
@@ -11,7 +14,7 @@ type EvalMode uint8
 const (
 	EvalScript EvalMode = iota // plain global script
 	EvalModule                  // ES module (static imports, export namespace)
-	EvalAsync                   // script with top-level await (qjs FlagAsync; goja: async IIFE)
+	EvalAsync                   // script with top-level await (goja: async IIFE)
 )
 
 // JSContext is the engine-agnostic JS execution surface.
@@ -19,8 +22,6 @@ type JSContext interface {
 	context.Context
 	SetContext(ctx context.Context)
 	Eval(filename, src string, mode EvalMode) error
-	EvalBytecode(filename string, bc []byte, mode EvalMode) error
-	Compile(filename, src string, mode EvalMode) ([]byte, error)
 	SetGoFunc(name string, fn GoFunc)
 	SetGoAsyncFunc(name string, fn GoFunc)
 }
@@ -34,7 +35,6 @@ type JSRuntime interface {
 // JSEngine is the factory that creates isolated JS runtimes.
 type JSEngine interface {
 	New() (JSRuntime, error)
-	SupportsBytecode() bool
 }
 
 // EngineKind is a convenience constant for engine selection.
@@ -43,8 +43,23 @@ type EngineKind string
 const (
 	// EngineGoja selects the pure-Go sobek (grafana/sobek) JS engine.
 	EngineGoja EngineKind = "goja"
+
+	defaultEngineKind = EngineGoja
 )
 
-// EngineQJS, NewEngineForKind, ValidateEngineKind are defined in:
-//   - dispatch_qjs.go  (//go:build qjs)
-//   - dispatch_stub.go (//go:build !qjs)
+// NewEngineForKind returns the JSEngine for the given kind. goja is the only
+// supported engine; any kind value resolves to it.
+func NewEngineForKind(kind EngineKind) JSEngine {
+	return &gojaEngine{}
+}
+
+// DefaultEngineKind returns the engine kind selected when no explicit kind is requested.
+func DefaultEngineKind() EngineKind { return defaultEngineKind }
+
+// ValidateEngineKind checks that the requested engine kind is available in this build.
+func ValidateEngineKind(kind EngineKind) error {
+	if kind == "" || kind == EngineGoja {
+		return nil
+	}
+	return fmt.Errorf("unknown engine %q; valid: goja", kind)
+}

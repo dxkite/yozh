@@ -9,11 +9,10 @@ import (
 )
 
 // gojaEngine implements JSEngine using the sobek (grafana/sobek, a goja fork) pure-Go JS interpreter.
-// Unlike the QJS/WASM engine, sobek runs host functions synchronously on the
-// same goroutine as the JS code, so SetGoAsyncFunc behaves identically to
-// SetGoFunc — no goroutine or Promise is created. JS callers that do
-// `await __go_fetchRaw(...)` simply receive the resolved value as an inline
-// microtask, which sobek drains before RunScript returns.
+// sobek runs host functions synchronously on the same goroutine as the JS code, so
+// SetGoAsyncFunc behaves identically to SetGoFunc — no goroutine or Promise is created.
+// JS callers that do `await __go_fetchRaw(...)` simply receive the resolved value as an
+// inline microtask, which sobek drains before RunScript returns.
 type gojaEngine struct{}
 
 func (e *gojaEngine) New() (JSRuntime, error) {
@@ -24,8 +23,6 @@ func (e *gojaEngine) New() (JSRuntime, error) {
 		ctx: &gojaContext{rt: rt, goCtx: context.Background()},
 	}, nil
 }
-
-func (e *gojaEngine) SupportsBytecode() bool { return false }
 
 // gojaRuntime wraps *sobek.Runtime.
 type gojaRuntime struct {
@@ -97,14 +94,6 @@ func (c *gojaContext) evalAsModule(filename, src string) error {
 		return fmt.Errorf("goja: module evaluation left pending Promise")
 	}
 }
-
-// EvalBytecode is not supported by sobek; falls back to Eval with source stored in bc.
-func (c *gojaContext) EvalBytecode(filename string, bc []byte, mode EvalMode) error {
-	return c.Eval(filename, string(bc), mode)
-}
-
-// Compile is not supported by sobek; always returns (nil, nil).
-func (c *gojaContext) Compile(_, _ string, _ EvalMode) ([]byte, error) { return nil, nil }
 
 func (c *gojaContext) SetGoFunc(name string, fn GoFunc) {
 	c.rt.Set(name, func(call sobek.FunctionCall) sobek.Value {

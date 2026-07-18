@@ -1,5 +1,3 @@
-//go:build qjs
-
 package integration_test
 
 import (

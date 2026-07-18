@@ -184,8 +184,8 @@
       var decoded = [];
       for (var i = 0; i < binParts.length; i++) {
         var u8 = binParts[i];
-        // Pass the underlying ArrayBuffer to Go — qjs marshals ArrayBuffer to []byte,
-        // which Go converts to a UTF-8 string directly without JSON round-trip.
+        // Pass the underlying ArrayBuffer to Go — the host binding marshals ArrayBuffer
+        // to []byte, which Go converts to a UTF-8 string directly without JSON round-trip.
         var buf = (u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength)
           ? u8.buffer
           : u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
@@ -268,7 +268,7 @@
 
   // ── setImmediate / clearImmediate ──────────────────────────────────────────
   // react-dom-server.node uses setImmediate(fn) to schedule async rendering
-  // work. QuickJS doesn't provide it natively — emulate via Promise microtask.
+  // work. This runtime doesn't provide it natively — emulate via Promise microtask.
   if (!globalThis.setImmediate) {
     globalThis.setImmediate = function(fn) {
       var args = Array.prototype.slice.call(arguments, 1);
@@ -361,7 +361,7 @@
         var pullPending = false;
 
         // PERF: pull() is deferred via Promise.resolve().then() to match the Streams
-        // spec microtask timing. Each read() on an empty queue costs one extra QJS
+        // spec microtask timing. Each read() on an empty queue costs one extra
         // event-loop cycle here. For Astro's bufferHeadContent (react-dom
         // renderToReadableStream), this adds ~10ms total across all chunks — minor
         // compared to the ~2.6s React rendering cost, so left as-is.

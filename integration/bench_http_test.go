@@ -1,5 +1,3 @@
-//go:build qjs
-
 package integration_test
 
 import (
@@ -19,8 +17,7 @@ import (
 )
 
 // gojaBenchBundle is a realistic ESM-format SSR bundle for goja benchmarks.
-// It exercises the same hot-path code as the QJS bench bundle:
-// URL parsing, Response construction, crypto.randomUUID().
+// It exercises common hot-path code: URL parsing, Response construction, crypto.randomUUID().
 var gojaBenchBundle = []byte(`
 var handler = function(config) {
     return async function(request, context) {
@@ -133,7 +130,7 @@ func startNodeServer(b *testing.B, port string) string {
 	return "http://localhost:" + port
 }
 
-// ── astro-runtime (Go + QuickJS) ─────────────────────────────────────────────
+// ── astro-runtime (Go + goja, real Astro app) ─────────────────────────────────
 
 func BenchmarkHTTP_AstroRuntime_Home(b *testing.B) {
 	silenceSlog(b)
@@ -158,22 +155,12 @@ func BenchmarkHTTP_AstroRuntime_Dynamic(b *testing.B) {
 
 // ── goja engine (synthetic bundle, same routes) ───────────────────────────────
 // Uses a simple IIFE bundle so benchmarks run without building the example app.
-// Compare with BenchmarkHTTP_AstroRuntime_* for a fair engine-only diff.
 
 func BenchmarkHTTP_Goja_Simple(b *testing.B) {
 	silenceSlog(b)
 	srv := httptest.NewServer(ssrHTTPHandler(gojaPool))
 	b.Cleanup(srv.Close)
 	hammerHTTP(b, srv.URL, "/products/123")
-}
-
-// BenchmarkHTTP_QJS_Simple uses sharedPool (real Astro app, QJS engine) so
-// we can compare QJS throughput with a path not covered by the dynamic benchmark.
-func BenchmarkHTTP_QJS_Simple(b *testing.B) {
-	silenceSlog(b)
-	srv := httptest.NewServer(ssrHTTPHandler(sharedPool))
-	b.Cleanup(srv.Close)
-	hammerHTTP(b, srv.URL, "/")
 }
 
 // ── Node.js (V8) ──────────────────────────────────────────────────────────────

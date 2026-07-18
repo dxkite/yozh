@@ -39,15 +39,10 @@ func benchFuwariHomepage(b *testing.B, packPath string) {
 		b.Fatalf("open pack: %v", err)
 	}
 
-	var poolOpts []PoolOption
-	switch {
-	case len(pc.gojaCode) > 0:
-		poolOpts = append(poolOpts, WithGojaBundle(pc.gojaCode))
-	case len(pc.bundleBC) > 0:
-		poolOpts = append(poolOpts, WithPrecompiledBundle(pc.bundleBC), WithEngineKind(EngineQJS))
-	default:
-		b.Fatal("pack has neither gojaCode nor bundleBC")
+	if len(pc.gojaCode) == 0 {
+		b.Fatal("pack has no gojaCode")
 	}
+	poolOpts := []PoolOption{WithGojaBundle(pc.gojaCode)}
 	poolOpts = append(poolOpts,
 		WithEnv(map[string]string{"API_BASE_URL": fuwariAPIBaseURL}),
 		WithSize(runtime.NumCPU()),

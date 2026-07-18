@@ -10,18 +10,16 @@
 | pnpm | v10+ |
 | Astro | 5.x |
 | @astrojs/netlify | 6.x |
-| JS 引擎（QJS） | github.com/dxkite/qjs（QuickJS/WASM） |
-| JS 引擎（goja） | github.com/grafana/sobek（goja Grafana fork） |
+| JS 引擎 | github.com/grafana/sobek（goja Grafana fork，纯 Go 实现，唯一支持的引擎） |
 | 更新日期 | 2026-06-29 |
 
 ## 目录结构
 
 ```
-asyncfunc_test.go             # SetGoAsyncFunc 单元测试（3 个）
 goja_test.go                  # goja/sobek 引擎单元测试（2 个）
 pack_rebuild_test.go          # pack 重建测试（需 UPDATE_TESTDATA=1）
 rebuild_testdata_test.go      # testdata 重建（需 UPDATE_TESTDATA=1）
-shim_test.go                  # Node.js 内建模块 shim 测试（14 个）
+shims_test.go                 # Node.js 内建模块 shim 测试（14 个）
 
 integration/
 ├── integration_test.go       # SSR + polyfill + BFF + pack + context + trace（56 个）
@@ -30,7 +28,7 @@ integration/
 └── testdata/
     └── example/
         ├── bundle.mjs        # 预打包 ESM（从 examples/example 生成）
-        └── example.pack      # 预打包 pack（bundle.bc + bundle-goja.mjs + dist/）
+        └── example.pack      # 预打包 pack（bundle.mjs + dist/）
 ```
 
 `bundle.mjs` 和 `example.pack` 已提交到 git，
@@ -104,7 +102,9 @@ TestGojaRequest
 
 ### Node.js 内建模块 Shim 测试（根模块）
 
-`shim_test.go` 验证每个 Node.js 内建模块的 ESM stub 能被 QJS 正确加载和执行。
+`shims_test.go`（根模块）验证每个 Node.js 内建模块的 ESM stub 能被 goja/sobek 正确加载和执行——
+直接构造 `sobek.Runtime`（`sobek.New()`），ES module 场景用 `sobek.ParseModule` / `.Link()` / `.Evaluate()`
+跑通模块图，普通脚本场景用 `rt.RunScript()`。
 
 | 测试 | 模块 |
 |---|---|
@@ -190,7 +190,7 @@ TestCartAPIEmpty
 TestCartSession
 ```
 **验证**：POST `/api/cart` 添加商品 → GET `/api/cart` 含 `Cereal` → GET `/cart` 页面含 `Cereal`。
-使用 size=1 的 Pool，保证所有请求打到同一 QJS runtime（保留 in-memory session state）。
+使用 size=1 的 Pool，保证所有请求打到同一 runtime（保留 in-memory session state）。
 
 ---
 
@@ -294,7 +294,7 @@ TestGetRandomValues
 
 #### TC-21：Polyfills 初始化 smoke test
 ```go
-TestPolyfillsQJSInit
+TestPolyfillsInit
 ```
 **验证**：最小 bundle 创建 Pool（size=2）不报错，即 polyfills 正确加载
 
@@ -393,7 +393,12 @@ TestBFFGracefulDegradation
 ```go
 TestBFFConcurrentFetch
 ```
-**验证**：3×80ms 并发请求总耗时 < 240ms（非顺序执行；实测 ~81ms）
+**验证**：3×80ms 请求总耗时 < 240ms（非顺序执行）。
+
+**已知问题**：goja 引擎下 `SetGoAsyncFunc` 同步执行宿主函数（无后台 goroutine 调度），
+`await fetch()` 内部是一次阻塞式 HTTP 调用，同一请求内多次 fetch 目前是顺序执行的
+（实测 3×80ms ≈ 246ms），与本用例断言的"非顺序执行"矛盾。详见 [bff-example.md](./bff-example.md) 中
+"fetch() 的执行模型"一节。
 
 ---
 
@@ -663,32 +668,6 @@ TestImageCDNAbsoluteURL
 
 ---
 
-### 并发异步函数测试（asyncfunc_test.go，根模块）
-
-#### TC-65：单次 async 调用
-```go
-TestSetAsyncFuncSingle
-```
-**验证**：`SetGoAsyncFunc` 注册的函数被 `await` 调用，goroutine 正确 resolve Promise
-
----
-
-#### TC-66：多次并发 async 调用
-```go
-TestSetAsyncFuncConcurrent
-```
-**验证**：10 次并发 `Promise.allSettled`，所有调用均正确 resolve，无 race condition
-
----
-
-#### TC-67：并发耗时验证
-```go
-TestSetAsyncFuncTiming
-```
-**验证**：3 个各 50ms 的 async 调用，总耗时 ≤ 120ms（并发执行；实测 ~100ms）
-
----
-
 ## 测试总结
 
 | 类别 | 测试数 | 状态 |
@@ -704,8 +683,7 @@ TestSetAsyncFuncTiming
 | Context 提取（默认/fallback/provider/JS hook） | 6 | ✅ |
 | 请求链路追踪（hooks、计时、fetch、checkpoint） | 9 | ✅ |
 | 图像 CDN（public/Astro asset/pack FS/绝对 URL/格式/缩放） | 11 | ✅ |
-| 并发 async（SetGoAsyncFunc 单元） | 3 | ✅ |
-| **合计（Test 函数）** | **83** | **全部通过** |
+| **合计（Test 函数）** | **80** | **全部通过** |
 
 最后运行时间：2026-06-29 10:05，`go test ./... -timeout 120s`，耗时约 5.6s。
 
@@ -713,15 +691,7 @@ TestSetAsyncFuncTiming
 
 ## 调试问题记录
 
-### 问题一：`renderToReadableStream` 静默失败
-
-**根因**：QJS 中 `isNode = false`，Astro 走 `renderToReadableStream` → 调用 `setTimeout`（QJS 无内置），错误被 ReadableStream 吞掉。
-
-**修复**：`Symbol.toStringTag = 'process'` 使 `isNode = true`，走 `renderToAsyncIterable` 路径。
-
----
-
-### 问题二：`@astrojs/netlify` 二级工厂
+### 问题一：`@astrojs/netlify` 二级工厂
 
 **根因**：`createExports` 返回 `{ default: createHandler }`，需再调用工厂。
 
@@ -729,7 +699,7 @@ TestSetAsyncFuncTiming
 
 ---
 
-### 问题三：TestCartSession 会话丢失
+### 问题二：TestCartSession 会话丢失
 
 **根因**：Pool `Get()` 在前一请求的 `Put()` 未完成时创建新 runtime，导致 size=1 的 Pool 不保证复用同一 runtime。
 
@@ -737,7 +707,7 @@ TestSetAsyncFuncTiming
 
 ---
 
-### 问题四：TestImageCDNAbsoluteURL → 415
+### 问题三：TestImageCDNAbsoluteURL → 415
 
 **根因**：`openSource` 对 HTTP URL 返回 `name=""`；`filepath.Ext("")=""` → `ext=""` → `errUnsupportedFormat`。
 
@@ -745,7 +715,7 @@ TestSetAsyncFuncTiming
 
 ---
 
-### 问题五：goja bundle 中 `for await` 语法错误
+### 问题四：goja bundle 中 `for await` 语法错误
 
 **根因**：Astro bundle 使用 `for await...of`（ES2018），goja/sobek 不支持该语法，导致解析失败。
 
@@ -753,7 +723,7 @@ TestSetAsyncFuncTiming
 
 ---
 
-### 问题六：goja bundle 中动态 `import()` 语法错误
+### 问题五：goja bundle 中动态 `import()` 语法错误
 
 **根因**：esbuild 无法静态分析 `import(driverName)` 中的变量路径，将其原样输出；goja 不支持 `import()` 表达式（ES2020），导致解析失败。
 
@@ -765,16 +735,8 @@ session driver 的加载代码有 try/catch 保护，运行时优雅降级。
 
 ---
 
-### 问题七：重建 testdata 与集成测试并发写文件
+### 问题六：重建 testdata 与集成测试并发写文件
 
 **根因**：`go test ./...` 并行运行根模块测试和集成测试；根模块的 rebuild 测试写入 `example.pack`，集成测试同时读取，导致 `TestImageCDNFromPack` 随机失败。
 
 **修复**：rebuild 测试默认 Skip，需 `UPDATE_TESTDATA=1` 环境变量显式激活。
-
----
-
-### 问题八：`ReferenceError: could not load module filename 'entry.mjs'`
-
-**根因**：`example.pack` 中的 `bundle.bc` 由旧版 QJS WASM 二进制编译，新版无法识别字节码格式，bootstrap 的 `import * from 'entry.mjs'` 找不到模块。
-
-**修复**：`UPDATE_TESTDATA=1 go test -run TestRebuildTestdata` 用当前二进制重新编译字节码并写回 pack。

@@ -235,7 +235,7 @@ func CompileJSToWasm(staticJS []byte) ([]byte, error) {
         HostFuncs:  astroHostFuncs,  // 固定列表，与 wasm_hostfuncs.go 对应
     })
     if errors.Is(err, js2wasm.ErrUnsupported) {
-        // 降级：使用 QJS 路径
+        // 降级：回退到 goja eval 路径（bundle 作为 ESM 源码直接跑在常规 goja Pool 上）
         return nil, err
     }
     return wasmBytes, err
@@ -248,7 +248,7 @@ astro-runtime 的构建流程：
 go run ./cmd build --wasm --entry entry.mjs --out bundle.pack
 
 1. BundleStatic(entry.mjs)         → static-bundle.js
-2. js2wasm.Compile(staticBundle)   → bundle.wasm  （或降级到 CompileBundleBytecode）
+2. js2wasm.Compile(staticBundle)   → bundle.wasm  （或降级为普通 bundle.mjs，走 goja eval 路径）
 3. BuildWASMPack(bundle.wasm, ...) → bundle.pack
 ```
 
@@ -256,17 +256,18 @@ go run ./cmd build --wasm --entry entry.mjs --out bundle.pack
 
 ```
 js2wasm.Compile() 返回 ErrUnsupported
-  → astro-runtime 降级调用 CompileBundleBytecode()（QuickJS 路径）
+  → astro-runtime 降级：不编译 WASM，直接把 bundle 作为普通 ESM 源码交给 goja Pool（唯一的运行时引擎）求值
   → 记录日志：哪个 JS 构造触发了降级
-  → 仍输出可用的 bundle.pack（包含 bundle.bc，不含 bundle.wasm）
+  → 仍输出可用的 bundle.pack（包含 bundle.mjs，不含 bundle.wasm）
 ```
 
-降级不影响正确性，只影响性能。开发者可通过日志定位哪些 JS 模式阻止了 WASM 编译，逐步优化 bundle。
+降级不影响正确性，只影响性能（goja 直接 eval 源码，没有 WASM 编译带来的执行速度收益）。
+开发者可通过日志定位哪些 JS 模式阻止了 WASM 编译，逐步优化 bundle。
 
 ## 测试策略
 
 - **单元测试**：每种 JS 构造 → 预期 WASM 指令序列（用 wasm-disassemble 或手动验证）
-- **集成测试**：用 wazero 执行产出的 WASM，验证与 QJS 路径输出等价
+- **集成测试**：用 wazero 执行产出的 WASM，验证与 goja eval 路径的输出等价
 - **Fuzz 测试**：对 staticifyPlugin 的输出进行 fuzzing，验证编译器不崩溃（仅允许返回 ErrUnsupported）
 
 ## 路线图

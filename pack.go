@@ -22,13 +22,9 @@ func loadPackData(r io.Reader) ([]byte, error) {
 	return io.ReadAll(r)
 }
 
-// packContents holds the extracted contents of a .pack file.
-//
-// Exactly one of bundleBC or gojaCode is non-nil depending on the pack engine:
-//   - Goja pack: gojaCode set, bundleBC nil  (bundle.mjs + dist/)
-//   - QJS pack:  bundleBC set, gojaCode nil  (bundle.bc  + dist/)
+// packContents holds the extracted contents of a .pack file: a goja-format ESM
+// bundle (bundle.mjs) plus the static-asset dist/ directory.
 type packContents struct {
-	bundleBC []byte // QJS bytecode (bundle.bc)
 	gojaCode []byte // goja-format ESM (bundle.mjs)
 	distFS   fs.FS
 }
@@ -41,17 +37,16 @@ func openPackContentsInMemory(data []byte) (*packContents, error) {
 	}
 
 	gojaCode, _ := readZipEntry(r, "bundle.mjs")
-	bundleBC, _ := readZipEntry(r, "bundle.bc")
 
-	if len(gojaCode) == 0 && len(bundleBC) == 0 {
-		return nil, fmt.Errorf("pack: missing bundle.mjs (goja) or bundle.bc (qjs)")
+	if len(gojaCode) == 0 {
+		return nil, fmt.Errorf("pack: missing bundle.mjs")
 	}
 
 	sub, err := fs.Sub(r, "dist")
 	if err != nil {
 		return nil, fmt.Errorf("dist sub-fs: %w", err)
 	}
-	return &packContents{bundleBC: bundleBC, gojaCode: gojaCode, distFS: sub}, nil
+	return &packContents{gojaCode: gojaCode, distFS: sub}, nil
 }
 
 // openPackFile reads a .pack from disk. With a non-empty cacheDir it extracts to
@@ -136,12 +131,11 @@ func readPackFromDir(dir string) (*packContents, error) {
 	distPath := filepath.Join(dir, "dist")
 
 	gojaCode, _ := os.ReadFile(filepath.Join(dir, "bundle.mjs"))
-	bundleBC, _ := os.ReadFile(filepath.Join(dir, "bundle.bc"))
 
-	if len(gojaCode) == 0 && len(bundleBC) == 0 {
-		return nil, fmt.Errorf("pack: missing bundle.mjs or bundle.bc in %s", dir)
+	if len(gojaCode) == 0 {
+		return nil, fmt.Errorf("pack: missing bundle.mjs in %s", dir)
 	}
-	return &packContents{bundleBC: bundleBC, gojaCode: gojaCode, distFS: os.DirFS(distPath)}, nil
+	return &packContents{gojaCode: gojaCode, distFS: os.DirFS(distPath)}, nil
 }
 
 // fileExists reports whether path exists on disk.
@@ -253,41 +247,25 @@ func readZipEntry(r *zip.Reader, name string) ([]byte, error) {
 
 // ── Pack builder ──────────────────────────────────────────────────────────────
 
-// BuildPack bundles jsCode into a deployable .pack zip at outPath.
-//
-// The output format depends on engineKind:
-//
-//	EngineGoja → bundle.mjs (goja-format ESM) + dist/
-//	EngineQJS  → bundle.bc  (QuickJS bytecode) + dist/  (requires -tags qjs)
-//
-// jsCode must be a self-contained ESM bundle from BundleSSR.
-func BuildPack(outPath string, jsCode []byte, distDir string, engineKind EngineKind) error {
-	switch engineKind {
-	case EngineQJS:
-		bc, err := CompileBundleBytecode(jsCode)
-		if err != nil {
-			return fmt.Errorf("compile bytecode: %w", err)
-		}
-		return writePack(outPath, nil, bc, distDir)
-	default: // EngineGoja
-		gojaCode, err := ConvertBundleForGoja(jsCode)
-		if err != nil {
-			return fmt.Errorf("convert goja bundle: %w", err)
-		}
-		return writePack(outPath, gojaCode, nil, distDir)
+// BuildPack bundles jsCode into a deployable .pack zip at outPath: bundle.mjs
+// (goja-format ESM) + dist/. jsCode must be a self-contained ESM bundle from BundleSSR.
+func BuildPack(outPath string, jsCode []byte, distDir string) error {
+	gojaCode, err := ConvertBundleForGoja(jsCode)
+	if err != nil {
+		return fmt.Errorf("convert goja bundle: %w", err)
 	}
+	return writePack(outPath, gojaCode, distDir)
 }
 
 // BuildPackFromGoja creates a .pack zip from an already goja-formatted bundle (the output
 // of ConvertBundleForGoja or BundleSSRGoja/BundleSSRReact18). Use this instead of BuildPack
 // when you have already done the goja conversion to avoid double-wrapping.
 func BuildPackFromGoja(outPath string, gojaCode []byte, distDir string) error {
-	return writePack(outPath, gojaCode, nil, distDir)
+	return writePack(outPath, gojaCode, distDir)
 }
 
-// writePack creates a .pack zip.
-// Exactly one of gojaCode / bcBytes should be non-nil (engine-specific).
-func writePack(outPath string, gojaCode, bcBytes []byte, distDir string) error {
+// writePack creates a .pack zip containing bundle.mjs and, if present, dist/.
+func writePack(outPath string, gojaCode []byte, distDir string) error {
 	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
 		return err
 	}
@@ -301,11 +279,6 @@ func writePack(outPath string, gojaCode, bcBytes []byte, distDir string) error {
 
 	if len(gojaCode) > 0 {
 		if err := zipAddBytes(w, "bundle.mjs", gojaCode); err != nil {
-			return err
-		}
-	}
-	if len(bcBytes) > 0 {
-		if err := zipAddBytes(w, "bundle.bc", bcBytes); err != nil {
 			return err
 		}
 	}

@@ -18,7 +18,7 @@ entry.mjs
 
 ## 目标
 
-将任意 Astro SSR bundle 中可能存在的动态模式消除或标准化，使输出满足 `js2wasm` 编译器的输入规范。对于 `js2wasm` 不支持的复杂模式，保持原样——由 `js2wasm` 返回 `ErrUnsupported`，调用方降级到 QJS 路径。
+将任意 Astro SSR bundle 中可能存在的动态模式消除或标准化，使输出满足 `js2wasm` 编译器的输入规范。对于 `js2wasm` 不支持的复杂模式，保持原样——由 `js2wasm` 返回 `ErrUnsupported`，调用方降级到 goja eval 路径。
 
 ## 处理的动态模式
 
@@ -152,6 +152,6 @@ Plugins: []api.Plugin{
 
 ## 与现有代码的关系
 
-- **不修改** `BundleSSR()`——现有 QJS 路径不受影响
+- **不修改** `BundleSSR()`——现有 goja 路径不受影响
 - **新增** `BundleStatic()`，在 `BundleSSR` 基础上附加 `staticifyPlugin`
 - `runtime.go` 中的宿主函数注册（`injectHostFunctions`）保持不变——仅 WASM 路径使用 `staticifyPlugin` 的输出

@@ -9,25 +9,32 @@
 ### build 命令流程
 
 ```
-1. BundleSSR(absEntry) → jsCode []byte
-2. --plain:    writeOut(outPath, jsCode)
-   --bytecode: CompileBundleBytecode(jsCode) → bc; writeOut(outPath, bc)
-   --pack:     BuildPack(outPath, jsCode, absDist)
-               （内部：CompileBundleBytecode → writePack，输出 bundle.mjs+bundle.bc+dist/）
+--kind astro（默认）：
+  1. BundleSSR(absEntry) → jsCode []byte（esbuild ESM 打包，node/CJS-first conditions）
+  2. --pack:  BuildPack(outPath, jsCode, absDist)
+              （内部：ConvertBundleForGoja(jsCode) → gojaCode；writePack(outPath, gojaCode, absDist)，输出 bundle.mjs+dist/）
+     默认:    ConvertBundleForGoja(jsCode) → gojaCode; writeOut(outPath, gojaCode)，输出 bundle.mjs
+
+--kind react：
+  1. BundleSSRReact(absEntry) → gojaCode []byte（JSX + browser conditions，内部已含 ConvertBundleForGoja）
+  2. --pack:  BuildPackFromGoja(outPath, gojaCode, absDist)
+     默认:    writeOut(outPath, gojaCode)
 ```
+
+无论哪种 `--kind`，最终产物都只有 goja 格式的 `bundle.mjs`（或 `.pack` 内的 `bundle.mjs` + `dist/`）；没有字节码编译步骤，也没有 `--bytecode`/`--plain` 这类标志。
 
 ### serve 命令流程
 
 ```
---pack:   NewRuntime(WithPackFile, WithCacheDir, WithPoolOptions(WithEnv))
+--pack:   NewRuntime(WithPackFile, WithCacheDir, WithPackCacheSize, WithPoolOptions(WithEnv, WithBootstrap, WithPolyfill, WithSelfURL))
           → rt.ListenAndServe(addr)
 
 --bundle: jsCode = os.ReadFile(bundle)
-          NewRuntime(WithBundle, WithDistDir, WithCacheDir, WithPoolOptions(WithEnv))
+          NewRuntime(WithBundle, WithDistDir, WithCacheDir, WithPoolOptions(...))
           → rt.ListenAndServe(addr)
 
---entry:  jsCode = BundleSSR(entry)
-          NewRuntime(WithBundle, WithDistDir, WithCacheDir, WithPoolOptions(WithEnv))
+--entry:  jsCode = BundleSSRGoja(entry)   // esbuild 打包 + ConvertBundleForGoja，产出 goja 格式 ESM
+          NewRuntime(WithBundle, WithDistDir, WithCacheDir, WithPoolOptions(...))
           → rt.ListenAndServe(addr)
 ```
 
@@ -37,6 +44,8 @@
 3. 默认 → entry 模式（`.netlify/build/entry.mjs`）
 
 `envMap()` 将 `os.Environ()` 转换为 `map[string]string`，注入到 JS 引擎的 `process.env`。
+`--bootstrap` / `--polyfill` 可指定文件路径，替换默认 bootstrap / 全部内置 polyfill。
+`serve` 没有 `--engine` 之类的引擎选择标志——goja 是唯一引擎。
 
 ---
 
@@ -46,35 +55,42 @@
 
 ```go
 func BuildPack(outPath string, jsCode []byte, distDir string) error
+func BuildPackFromGoja(outPath string, gojaCode []byte, distDir string) error
 ```
 
-编译字节码并打包为 .pack zip（bundle.mjs + bundle.bc + dist/）。
+`BuildPack` 接收 esbuild 直接打包的 ESM `jsCode`，内部先 `ConvertBundleForGoja` 转成 goja 兼容格式，
+再调用 `writePack` 写出 .pack zip（bundle.mjs + dist/）。没有 `engineKind` 参数——只有一种打包格式。
+
+`BuildPackFromGoja` 跳过转换步骤，直接把已经是 goja 格式的 `gojaCode`（例如 `BundleSSRReact` 的输出）
+写入 .pack，用于避免重复转换。
 
 ```go
-func CompileBundleBytecode(bundleSrc []byte) ([]byte, error)  // engine.go，对外导出（代理至 jsruntime）
-func BundleSSR(entryPath string) ([]byte, error)              // bundle.go，对外导出
+func BundleSSR(entryPath string) ([]byte, error)  // bundle.go，对外导出
 ```
 
 ### 加载（内部）
 
 | 函数 | 说明 |
 |---|---|
-| `openPackInMemory(data)` | zip → bundleBC + 内存 distFS（zip.Reader 直接作为 fs.FS） |
-| `openPackFile(path, cacheDir)` | 读磁盘 → openPackInMemory 或 extractPackToCache |
-| `extractPackToCache(data, cacheDir)` | SHA256 key → cacheDir/<hash>/ 持久解压，cache hit 跳过 |
+| `openPackContentsInMemory(data)` | zip → gojaCode（读取 `bundle.mjs`） + 内存 distFS（zip.Reader 直接作为 fs.FS） |
+| `openPackFile(path, cacheDir, maxSize)` | 读磁盘 → openPackContentsInMemory 或 extractPackToCache |
+| `extractPackToCache(data, cacheDir, maxSize)` | SHA256 key → cacheDir/<hash>/ 持久解压，cache hit 跳过；LRU 按 maxSize 淘汰 |
+| `readPackFromDir(dir)` | 从已解压目录读取 `bundle.mjs` + `dist/` |
 | `extractZip(r, destDir)` | 带路径遍历防护的 zip 解压 |
 | `readZipEntry(r, name)` | 读取单个 zip entry |
 | `loadPackData(r)` | io.Reader → []byte |
+
+`packContents` 结构体只有两个字段：`gojaCode []byte`（bundle.mjs 内容）和 `distFS fs.FS`。
 
 ### Pack 格式
 
 ```
 bundle.pack (zip)
-├── bundle.mjs      — esbuild 打包的自包含 ESM（QJS 可直接 eval）
-├── bundle.bc       — QuickJS 字节码（从 bundle.mjs 编译，启动时跳过 ~1.5s 编译耗时）
-├── bundle-goja.mjs — IIFE 格式 bundle（goja 引擎使用；ES2017 降级）
-└── dist/           — Astro 静态输出（_astro/*.{js,css,png,...}、index.html 等）
+├── bundle.mjs — goja 格式的自包含 ESM（由 ConvertBundleForGoja 生成，sobek 直接 eval）
+└── dist/      — Astro 静态输出（_astro/*.{js,css,png,...}、index.html 等）
 ```
+
+不再有 `bundle.bc`（字节码）或独立的 `bundle-goja.mjs` 条目——`bundle.mjs` 本身就是 goja 格式。
 
 ---
 
@@ -102,9 +118,9 @@ func NewRuntime(opts ...RuntimeOption) (*Runtime, error)
 
 ```
 WithPackReader  → loadPackData → 同 WithPack
-WithPack        → openPackInMemory 或 extractPackToCache（有 cacheDir 时）
+WithPack        → openPackContentsInMemory 或 extractPackToCache（有 cacheDir 时）
 WithPackFile    → openPackFile
-WithBundle      → 直接传 jsCode 给 NewPool（可选 WithBundleCache）
+WithBundle      → 直接传 jsCode 给 NewPool
 ```
 
 ### RuntimeOption
@@ -168,9 +184,9 @@ func BundleSSR(entryPath string) ([]byte, error)
 
 | 选项 | 值 | 原因 |
 |---|---|---|
-| `Format` | `FormatESModule` | QJS 使用 `TypeModule()` 加载，需要 ESM 格式 |
+| `Format` | `FormatESModule` | 输出 ESM，供后续 `ConvertBundleForGoja`/goja `ParseModule` 加载 |
 | `Platform` | `PlatformNeutral` | 不注入 Node.js/浏览器特有 shim |
-| `Target` | `ES2023` | QJS（QuickJS-NG）支持 ES2020+，ES2023 特性已充分覆盖 |
+| `Target` | `ES2023` | esbuild 尽量保留原始语法；真正供 goja 使用前还会经 `ConvertBundleForGoja` 降级到 ES2017 |
 | `Write` | `false` | 输出到内存，不写磁盘 |
 | `Conditions` | `["require", "node", "import", "default"]` | `require` 优先选取包的 CJS 发行版，避免 ESM 版拉入兄弟包 |
 | `MainFields` | `["main", "module", "browser"]` | `main` 优先 CJS，覆盖无 `exports` map 的老旧包 |
@@ -207,19 +223,19 @@ func (p *Pool) RequestContext(w, r) (*RequestContext, error)
 |---|---|---|
 | `WithEnv(env map[string]string)` | `{}` | 注入 process.env（不传则为空 map） |
 | `WithSize(n int)` | clamp(NumCPU, 2, 8) | Pool 大小，范围 [1, 1000]；0 = 自动 |
-| `WithEngine(engine JSEngine)` | — | 直接传入 JSEngine 实现（优先级最高） |
-| `WithEngineKind(kind EngineKind)` | — | 按名称选择引擎（`EngineGoja` / `EngineQJS`） |
-| `WithMemoryLimit(bytes int)` | 0（无限制） | 每个 QJS 实例 WASM 堆上限（0 = 不限，QJS only） |
-| `WithMaxStackSize(bytes int)` | 0（默认 256 KB） | JS 调用栈大小（0 = 引擎默认，QJS only） |
-| `WithMaxExecutionTime(ms int)` | 0（不限） | 单次 Eval 执行超时（毫秒；0 = 不限，QJS only） |
-| `WithGCThreshold(bytes int)` | 0（引擎默认） | GC 触发阈值（0 = 引擎默认，QJS only） |
-| `WithPrecompiledBundle(bc []byte)` | — | 传入预编译字节码，跳过 bundle 编译步骤（polyfill 仍每次编译，QJS only） |
-| `WithGojaBundle(code []byte)` | — | IIFE 格式 bundle，供 goja 引擎使用（从 pack 的 bundle-goja.mjs 加载），goja only |
-| `WithBundleCache(dir string)` | `""` | 字节码磁盘缓存目录；缓存 key = SHA256(bundle + vcs.revision)（QJS only） |
-| `WithRequestTimeout(d time.Duration)` | 0（不限） | 每请求超时，超时后 Await() 返回 ctx.Err()，立即释放 pool slot |
+| `WithGojaBundle(code []byte)` | — | goja 格式 ESM bundle（从 .pack 的 `bundle.mjs` 加载时使用）；未设置时回退到 `NewPool` 的 `bundleCode` 参数 |
 | `WithContextProvider(fn func(*http.Request) *NetlifyContext)` | — | 注册每请求的 NetlifyContext 构建函数，覆盖默认 IP 提取和 RequestID 逻辑 |
+| `WithRequestTimeout(d time.Duration)` | 0（不限） | 每请求超时，超时后 Await() 返回 ctx.Err()，立即释放 pool slot |
+| `WithBootstrap(src string)` | 内置 bootstrap-astro.js | 自定义 bootstrap 源码，作为 plain script eval，需定义 `globalThis.__handleRequest` |
+| `WithSelfURL(u string)` | `""` | 内部 base URL（如 `http://127.0.0.1:8080`），供 fetch.js 解析相对 URL 用 |
+| `WithPolyfill(src string)` | 内置 8 个 polyfill | 自定义 polyfill 源码，设置后替换全部内置 polyfill |
+| `WithEngine(engine JSEngine)` | — | 直接传入 JSEngine 实现（优先级高于 `WithEngineKind`） |
+| `WithEngineKind(kind EngineKind)` | — | 按名称选择引擎；目前 `EngineKind` 只有 `EngineGoja` 一个值，`kind` 参数实际上不再影响行为 |
 
-引擎选择优先级：`WithEngine` > `WithEngineKind` > 默认（有 `-tags qjs` 时为 `EngineQJS`，否则 `EngineGoja`）。
+没有 `WithMemoryLimit`、`WithMaxStackSize`、`WithMaxExecutionTime`、`WithGCThreshold`、`WithPrecompiledBundle`、`WithBundleCache`
+这些选项——它们都是 QJS/字节码专用旋钮，goja 直接 eval 源码，没有 WASM 堆或字节码编译步骤，因此这些选项随 QJS 一起被移除。
+
+引擎选择优先级：`WithEngine` > `WithEngineKind` > 默认（`jsruntime.DefaultEngineKind()`，恒为 `EngineGoja`）。
 
 ### PoolStats
 
@@ -286,50 +302,43 @@ Server-Timing 写入细节：
 
 ## internal/runtime/ — JS 引擎与运行时核心
 
-`package jsruntime`，包含所有引擎实现、运行时初始化、polyfill、host functions、字节码流水线和 bootstrap 文件。根包通过类型别名暴露公共 API。
+`package jsruntime`，包含引擎实现（goja/sobek，唯一引擎，无 build tag）、运行时初始化、polyfill、host functions
+和 bootstrap 文件。根包通过类型别名暴露公共 API。没有字节码流水线——所有源码均直接 `Eval`。
 
-### engine.go — 引擎接口
+### engine.go — 引擎接口（无 build tag，单文件）
 
 ```go
 type GoFunc     func(ctx context.Context, args ...any) (any, error)
 type EvalMode   uint8  // EvalScript | EvalModule | EvalAsync
-type JSContext  interface { ... }  // Eval / EvalBytecode / Compile / SetGoFunc / SetGoAsyncFunc
+type JSContext  interface {
+    context.Context
+    SetContext(ctx context.Context)
+    Eval(filename, src string, mode EvalMode) error
+    SetGoFunc(name string, fn GoFunc)
+    SetGoAsyncFunc(name string, fn GoFunc)
+}
 type JSRuntime  interface { Ctx() JSContext; Close() }
-type JSEngine   interface { New() (JSRuntime, error); SupportsBytecode() bool }
-type EngineKind string  // "goja" | "qjs"
+type JSEngine   interface { New() (JSRuntime, error) }
+type EngineKind string  // 只有 "goja"（EngineGoja）
+
+func NewEngineForKind(kind EngineKind) JSEngine  // kind 参数被忽略，恒定返回 &gojaEngine{}
+func DefaultEngineKind() EngineKind              // 恒为 EngineGoja
+func ValidateEngineKind(kind EngineKind) error   // 非 "" / EngineGoja 时报错
 ```
 
-### engine_goja.go — goja/sobek 实现
+`JSContext` 没有 `EvalBytecode`/`Compile` 方法，`JSEngine` 没有 `SupportsBytecode()`——这些接口方法只存在于
+QJS 时代，随字节码支持一起被删除。`engine_qjs.go`、`dispatch_qjs.go`/`dispatch_stub.go`、
+`bytecode.go`/`bytecode_qjs.go`/`bytecode_stub.go` 均已删除，不再存在于代码库中。
 
-纯 Go JS 引擎（grafana/sobek）。不支持字节码（`SupportsBytecode() = false`）。
-bundle 以 IIFE 格式加载（`WithGojaBundle`），由 `globalThis.__ssrEntry` 传递给 bootstrap-goja.js。
+### engine_goja.go — goja/sobek 实现（唯一引擎实现）
 
-### engine_qjs.go — QJS 实现（build tag: qjs）
+纯 Go JS 引擎（grafana/sobek）。`gojaEngine.New()` 创建 `sobek.Runtime` 并设置 `UncapFieldNameMapper()`。
+`Eval` 的 `EvalModule` 模式走 sobek 原生 `ParseModule → Link → Evaluate`；`EvalAsync` 模式把源码包进
+`(async()=>{ ... })()` IIFE 再用 `RunScript` 执行（顶层 await 语法糖）。
 
-QuickJS-NG via wazero。支持字节码（`SupportsBytecode() = true`）。
-QJS 特有参数：`MemoryLimit`、`MaxStackSize`、`MaxExecutionTime`、`GCThreshold`。
-
-### dispatch_qjs.go / dispatch_stub.go — 引擎分派
-
-```go
-func NewEngineForKind(kind EngineKind, memoryLimit, maxStackSize, maxExecutionTime, gcThreshold int) JSEngine
-func DefaultEngineKind() EngineKind  // qjs（有 -tags qjs）或 goja（无）
-func ValidateEngineKind(kind EngineKind) error
-```
-
-- `dispatch_qjs.go`（`//go:build qjs`）：`defaultEngineKind = EngineQJS`，同时支持 goja 和 qjs
-- `dispatch_stub.go`（`//go:build !qjs`）：`defaultEngineKind = EngineGoja`，选 qjs 返回 error
-
-### bytecode.go / bytecode_qjs.go / bytecode_stub.go — 字节码
-
-```go
-type PolyfillEntry struct { Name string; BC []byte }
-type BytecodeSet   struct { Polyfills []PolyfillEntry; Bundle []byte }
-func BundleCacheKey(bundleCode []byte) string  // SHA256(bundle + vcs.revision)
-```
-
-- `bytecode_qjs.go`（`//go:build qjs`）：实现 `CompileBytecodes`（编译 polyfill + bundle）
-- `bytecode_stub.go`（`//go:build !qjs`）：stub，返回 nil BytecodeSet
+sobek 的 host 函数与 JS 代码运行在同一 goroutine，因此 `SetGoAsyncFunc` 与 `SetGoFunc` 语义上等价：
+都是阻塞式调用 Go 函数，`SetGoAsyncFunc` 只是多包一层已经 resolve/reject 好的 `sobek.Promise`
+以匹配 JS 侧 `await` 语法，并不提供真正的并发。
 
 ### setup.go — SetupRuntime
 
@@ -341,18 +350,23 @@ type StreamCallbacks struct {
 }
 
 type SetupOptions struct {
-    BCS    *BytecodeSet      // nil → goja source path
-    Bundle []byte            // goja: ESM bundle source；QJS：当 BCS 有 Bundle 时忽略
-    Env    map[string]string
-    Stream StreamCallbacks
+    Bundle    []byte  // ESM bundle 源码
+    Env       map[string]string
+    Stream    StreamCallbacks
+    Bootstrap string  // 自定义 bootstrap 源码；"" = 使用内置 bootstrap-astro.js
+    Polyfill  string  // 自定义 polyfill 源码；非空时替换全部内置 polyfill
+    SelfURL   string  // 内部 base URL，供 fetch.js 解析相对 URL
 }
 
-func SetupRuntime(ctx JSContext, opts SetupOptions, engine JSEngine) error
+func SetupRuntime(ctx JSContext, opts SetupOptions) error
 ```
 
-初始化顺序：host functions → stream callbacks → polyfills → bundle → bootstrap。
-QJS 路径：polyfill 和 bundle 用 `EvalBytecode`；bootstrap 用 `Eval(bootstrapMJS, EvalModule)`。
-goja 路径：全部用 `Eval`；bootstrap 用 `Eval(bootstrapGojaJS, EvalScript)`。
+`SetupOptions` 没有 `BCS *BytecodeSet` 字段——那个字段在删除前就已经是死代码（`SetupRuntime` 内部从未读取它）。
+`SetupRuntime` 的参数列表也没有第三个 `engine JSEngine` 参数（同样是函数体内未使用的死参数）。
+
+初始化顺序：host functions → stream callbacks（`__go_sendHeaders`/`__go_sendChunk`/`__go_endStream`）→
+polyfills（8 个，按序）→ bundle（若非空，`Eval(entry.js, EvalModule)`）→ bootstrap
+（`Eval(bootstrap.js, resolveBootstrap(opts), EvalScript)`）。全部以源码字符串 `Eval`，无字节码步骤。
 
 ### hostfuncs.go — 二进制操作与 URL 解析
 
@@ -373,7 +387,8 @@ var fetchClient = &http.Client{Timeout: 30 * time.Second}
 func goFetch(urlStr, method, headersJSON, reqBody string) (result string, status int, err error)
 ```
 
-`__go_fetchRaw` 通过 `SetGoAsyncFunc` 注册，goroutine 执行 HTTP 请求不阻塞 WASM 线程。
+`__go_fetchRaw` 通过 `SetGoAsyncFunc` 注册；goja 下该调用在当前 goroutine 上同步阻塞执行
+（见 engine_goja.go 一节），并不启动额外 goroutine。
 
 ### crypto.go — Web Crypto API
 
@@ -392,7 +407,7 @@ func goFetch(urlStr, method, headersJSON, reqBody string) (result string, status
 //go:embed js/fetch.js
 ```
 
-`polyfillSources()` 按顺序返回 8 个 polyfill，供 goja 路径 eval。
+`polyfillSources()` 按顺序返回 8 个 polyfill，供 `SetupRuntime` 逐个 eval。
 
 ### logx.go — 结构化日志
 
@@ -405,11 +420,13 @@ func Log() *slog.Logger  // 返回当前 package-level logger
 
 `ctxHandler` 包装 `slog.Handler`，在 `Handle` 时自动从 ctx 提取并注入每请求 attrs（method、path、status、latency）。
 
-### bootstrap.mjs — QJS bootstrap（ES module）
+### bootstrap-astro.js — bootstrap（plain script，唯一 bootstrap 文件）
 
-通过 `//go:embed bootstrap.mjs` 嵌入（`internal/runtime/setup.go`），在 QJS 运行时初始化最后 eval。
+通过 `//go:embed bootstrap-astro.js` 嵌入为 `bootstrapAstroJS`（`internal/runtime/setup.go`），
+在运行时初始化的最后一步以 `EvalScript` 方式 eval。
 
-入口：`import * as _entry from 'entry.mjs'`（QJS 模块系统加载 bundle）。
+入口：`var _entry = globalThis.__ssrEntry`（由 goja 格式 bundle 在模块 eval 时以副作用设置，
+参见 `ConvertBundleForGoja`/`gojaWrapperPlugin`），不是 ES module，没有 `import` 语句。
 
 主要职责：
 - 检测 Netlify adapter 导出格式，初始化 `__ssrHandler`
@@ -432,12 +449,6 @@ while (reader.read()) __go_sendChunk(chunk)            // 逐 chunk
 __go_endStream(JSON.stringify(_spans))                 // 含 ssr/resp span，Go 写 trailer
 ```
 
-### bootstrap-goja.js — goja bootstrap（plain script）
-
-入口：`var _entry = globalThis.__ssrEntry`（由 IIFE bundle eval 后设置）。
-
-除入口方式外，逻辑与 bootstrap.mjs 完全相同：同样的双路径（buffer/stream），同样的 span 名称（`ssr`/`resp`），同样的 `buildNetlifyContext`，同样的 `__go_sendHeaders` / `__go_sendChunk` / `__go_endStream` 调用。
-
 ---
 
 ## engine.go（根包）— 类型别名与代理
@@ -451,11 +462,13 @@ type JSEngine   = jsruntime.JSEngine
 type EngineKind = jsruntime.EngineKind
 
 const EvalScript, EvalModule, EvalAsync EvalMode = ...
-const EngineGoja, EngineQJS EngineKind   = ...
+const EngineGoja EngineKind = jsruntime.EngineGoja  // 唯一取值，没有 EngineQJS
 
 func ValidateEngineKind(kind EngineKind) error
-func CompileBundleBytecode(bundleSrc []byte) ([]byte, error)
 ```
+
+没有 `CompileBundleBytecode` 函数——它曾是对 `jsruntime.CompileBundleBytecode`（QJS 专用字节码编译器）的
+薄封装，随字节码支持一起被整体删除，根包没有替代品。
 
 ---
 

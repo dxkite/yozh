@@ -37,7 +37,7 @@ if (!globalThis.MessageChannel) {
 }
 if (!globalThis.WebAssembly) { globalThis.WebAssembly = { validate: function() { return false; }, instantiate: function() { return Promise.reject(new Error('WebAssembly not supported')); }, compile: function() { return Promise.reject(new Error('WebAssembly not supported')); } }; }
 if (!globalThis.performance) { globalThis.performance = { now: function() { return Date.now(); }, timeOrigin: 0 }; }
-// setTimeout/clearTimeout — QJS has no native event loop timer.
+// setTimeout/clearTimeout — goja (sobek) has no native event loop timer.
 // We implement a minimal version using Promise microtasks for delay=0 (most common in SSR).
 if (!globalThis.setTimeout) {
   var __timerMap = Object.create(null);
@@ -45,15 +45,15 @@ if (!globalThis.setTimeout) {
   globalThis.setTimeout = function setTimeout(fn, delay) {
     var id = __timerId++;
     __timerMap[id] = true;
-    // QJS async-eval path has no OS event loop — all delays collapse to a single
-    // microtask tick. The callback is always executed (ignoring the delay value).
+    // This runtime's async-eval path has no OS event loop — all delays collapse to a
+    // single microtask tick. The callback is always executed (ignoring the delay value).
     Promise.resolve().then(function() {
       if (__timerMap[id] !== false) { delete __timerMap[id]; if (typeof fn === 'function') fn(); }
     });
     return id;
   };
   globalThis.clearTimeout = function clearTimeout(id) { __timerMap[id] = false; };
-  // setInterval cannot truly repeat in QJS async-eval mode — fires once like setTimeout.
+  // setInterval cannot truly repeat in this async-eval mode — fires once like setTimeout.
   globalThis.setInterval = function setInterval(fn, delay) { return setTimeout(fn, delay); };
   globalThis.clearInterval = function clearInterval(id) { __timerMap[id] = false; };
 }

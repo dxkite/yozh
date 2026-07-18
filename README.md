@@ -2,7 +2,7 @@
 
 在不依赖 Node.js 或任何云平台 CLI 的情况下，运行 `@astrojs/netlify` 适配器编译的 Astro SSR 应用。
 
-支持两种 JS 引擎：[QuickJS-NG](https://github.com/nicowillis/quickjs-ng)（通过 [wazero](https://wazero.io) 嵌入，默认）和 [goja/sobek](https://github.com/grafana/sobek)（纯 Go，无 WASM）。单个静态 Go 二进制，零运行时依赖。
+JS 引擎基于 [goja/sobek](https://github.com/grafana/sobek)（纯 Go，无 WASM）。单个静态 Go 二进制，零运行时依赖。
 
 ```bash
 astro-runtime serve --pack bundle.pack --port 8888
@@ -13,9 +13,9 @@ astro-runtime serve --pack bundle.pack --port 8888
 ## 特性
 
 - **无 Node.js 依赖** — 静态二进制，`CGO_ENABLED=0`，可直接跑在 Alpine / scratch 镜像
-- **双引擎** — QJS（QuickJS-NG/WASM，默认）与 goja（纯 Go，快 3×、内存少 19×）；`WithEngineKind` 按需切换
+- **goja 引擎** — 纯 Go JS 运行时（`grafana/sobek`），无 WASM、无 CGO
 - **Pool 并发模型** — 多个 JS worker 并行处理请求，高并发渲染不阻塞
-- **Pack 格式** — 单文件部署（bundle.mjs + bytecode + dist/），无 node_modules
+- **Pack 格式** — 单文件部署（bundle.mjs + dist/），无 node_modules
 - **AsyncIterator buffer → Content-Length** — Astro 典型路径（`renderToAsyncIterable`）在 JS 侧收集全部 chunk 后单次写入，附带精确的 `Content-Length`；ReadableStream 路径走 Chunked Transfer-Encoding
 - **Server-Timing** — 响应头携带 `pool;dur=X, js;dur=Y`（Go 端）+ `ssr;dur=A, resp;dur=B`（JS 端，buffer 模式注入初始头，stream 模式写 trailer）
 - **图片 CDN** — `/.netlify/images` resize / crop / format 转换（JPEG / PNG / WebP → AVIF）
@@ -43,7 +43,7 @@ go build -o astro-runtime ./cmd
 cd your-astro-project
 pnpm exec astro build
 
-# 生成 bundle.pack（单文件，含 bytecode + 静态资产）
+# 生成 bundle.pack（单文件，含 goja bundle + 静态资产）
 astro-runtime build --pack \
   --entry .netlify/build/entry.mjs \
   --dist dist \
@@ -64,15 +64,14 @@ astro-runtime serve --pack bundle.pack --port 8888
 ### `build` — 打包 Astro SSR 产物
 
 ```
-astro-runtime build [--plain | --bytecode | --pack] --entry <path> [options]
+astro-runtime build [--pack] --entry <path> [options]
 ```
 
 | 参数 | 说明 |
 |---|---|
 | `--entry` | SSR entry 路径（默认 `.netlify/build/entry.mjs`） |
-| `--plain` | 输出自包含 JS bundle（`.mjs`） |
-| `--bytecode` | 输出 QuickJS 字节码（`.bc`） |
-| `--pack` | 输出部署包（`.pack`，含 bundle.mjs + bundle.bc + bundle-goja.mjs + dist/） |
+| `--kind` | entry 类型：`astro`（Netlify SSR，默认）或 `react`（JSX/TSX，浏览器条件） |
+| `--pack` | 输出部署包（`.pack`，含 bundle.mjs + dist/） |
 | `--dist` | 静态输出目录（`--pack` 时打包进去，默认 `dist`） |
 | `--out` | 输出路径（默认由模式决定） |
 
@@ -89,7 +88,10 @@ astro-runtime serve [--pack <path> | --bundle <path> | --entry <path>] [options]
 | `--entry` | — | SSR entry（启动时实时打包，适合开发） |
 | `--dist` | `dist` | 静态资产目录（`--bundle` / `--entry` 时使用） |
 | `--port` | `8888` | 监听端口 |
-| `--cache-dir` | `$XDG_CACHE_HOME/astro-runtime` | 字节码缓存目录（空字符串禁用） |
+| `--cache-dir` | `$XDG_CACHE_HOME/astro-runtime` | pack 解压缓存目录（空字符串禁用） |
+| `--pack-cache-size` | `0`（默认 3） | 最多保留的解压缓存目录数（负数为不限） |
+| `--bootstrap` | — | 自定义 bootstrap `.js` 文件路径 |
+| `--polyfill` | — | 替换全部内置 polyfill 的 JS 文件路径 |
 
 > 未指定任何模式时，自动按 `bundle.pack` → `bundle.mjs` → `entry.mjs` 顺序探测。
 
@@ -146,20 +148,6 @@ defer rt.Close()
 log.Fatal(rt.ListenAndServe(":8888"))
 ```
 
-### 指定引擎
-
-```go
-// goja 引擎（纯 Go，无 WASM 依赖）
-astroruntime.WithPoolOptions(
-    astroruntime.WithEngineKind(astroruntime.EngineGoja),
-)
-
-// QJS 引擎（需 -tags qjs 编译）
-astroruntime.WithPoolOptions(
-    astroruntime.WithEngineKind(astroruntime.EngineQJS),
-)
-```
-
 ### 嵌入现有 HTTP 服务（BFF 模式）
 
 ```go
@@ -177,7 +165,7 @@ http.ListenAndServe(":8080", mux)
 ### 打包 SSR bundle
 
 ```go
-// entry.mjs → esbuild 内联 → QuickJS 字节码 → .pack
+// entry.mjs → esbuild 内联 → goja 格式转换 → .pack
 jsCode, _ := astroruntime.BundleSSR("/path/to/entry.mjs")
 err = astroruntime.BuildPack("bundle.pack", jsCode, "/path/to/dist")
 ```
@@ -188,32 +176,19 @@ err = astroruntime.BuildPack("bundle.pack", jsCode, "/path/to/dist")
 
 Apple M5，10 CPU，`go test -bench`（pool size=4，GOMAXPROCS=10）：
 
-### 引擎执行速度对比（合成 bundle，相同工作负载）
-
-| 引擎 | ns/op | 等价 op/s | 内存/op |
-|---|---|---|---|
-| goja（grafana/sobek，纯 Go） | **76,588** | **~13,053** | **88 KB** |
-| QJS（QuickJS/WASM bytecode） | 231,741 | ~4,316 | 1,717 KB |
-| 倍差 | goja **3.0×** | — | goja **19×** 更少 |
-
-### 真实 Astro 应用（QJS）vs Node.js V8
-
-| 路由 | QJS RPS | Node.js RPS | 说明 |
-|---|---|---|---|
-| `/api/products`（JSON API） | 4,699 | **24,102** | V8 JIT 快 5.1× |
-| `/products/1`（动态路由） | 3,140 | **20,302** | V8 JIT 快 6.5× |
-| `/`（首页，fetch + HTML 渲染，c=32） | **2,237** | 1,190 | Go pool 并发快 **1.9×** |
-
 ### Pool 冷启动
 
-| 引擎 | size=1 | size=4 |
-|---|---|---|
-| QJS bytecode | 5.3 ms | 13.9 ms |
-| **goja** | **1.1 ms** | **4.7 ms** |
+| size=1 | size=4 |
+|---|---|
+| **1.1 ms** | **4.7 ms** |
+
+goja 是纯 Go 实现，无需 WASM 初始化，冷启动很快。
+
+### 真实 Astro 应用 vs Node.js V8
+
+轻计算的 JSON API / 动态路由场景下，V8 JIT 领先明显；而在高并发、含 outbound fetch 的复杂页面渲染场景下，Go pool 的并发模型可以反超 Node.js 单线程事件循环。完整数据见 [docs/benchmark.md](./docs/benchmark.md)。
 
 **镜像大小**：astro-runtime ~42 MB vs Node.js SSR 228 MB（小 **5.4×**）。
-
-> **引擎选择**：goja 通过两步打包（ESM→IIFE + ES2017 降级）支持完整 Astro 应用，且比 QJS 快 3×、内存少 19×；默认 QJS 引擎更成熟稳定。详见 [docs/benchmark.md](./docs/benchmark.md)。
 
 ---
 
@@ -255,11 +230,10 @@ pnpm install && pnpm build
 
 | 依赖 | 用途 |
 |---|---|
-| [dxkite/qjs](https://github.com/dxkite/qjs) | QuickJS-NG via wazero — QJS 引擎（`-tags qjs`） |
-| [grafana/sobek](https://github.com/grafana/sobek) | 纯 Go JS 引擎（goja 路径） |
-| [tetratelabs/wazero](https://github.com/tetratelabs/wazero) | 纯 Go WebAssembly 运行时（QJS 间接依赖） |
+| [grafana/sobek](https://github.com/grafana/sobek) | 纯 Go JS 引擎（goja fork） |
 | [evanw/esbuild](https://github.com/evanw/esbuild) | ESM bundle 打包（`BundleSSR`） |
 | [spf13/cobra](https://github.com/spf13/cobra) | CLI 命令框架 |
+| [golang.org/x/image](https://pkg.go.dev/golang.org/x/image) | 图片 CDN（resize / crop / format 转换） |
 
 ---
 

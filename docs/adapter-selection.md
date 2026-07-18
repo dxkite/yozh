@@ -29,7 +29,7 @@ Go BFF 服务（处理业务逻辑、鉴权、数据聚合）
 astro-runtime（Pool.Get → HandleSSR）
   │
   ▼
-QJS 运行时（Astro SSR bundle）
+goja 运行时（Astro SSR bundle）
   │
   ▼
 HTML 字符串（注入到 BFF 响应中）
@@ -63,7 +63,7 @@ Astro 通过 **适配器（Adapter）** 决定 SSR 的输出格式。不同适�
 所有第三方依赖已内联，无需 `node_modules`。
 
 对比 `@astrojs/node`：产物是 ESM 模块树，依赖 `fs`、`stream`、`child_process`、`http` 等 Node 内置模块。
-在 QuickJS 中模拟完整 Node.js 内置模块不现实，而 Netlify 适配器只依赖 **Web Platform API**（已由 polyfills 覆盖）。
+在 goja 中模拟完整 Node.js 内置模块不现实，而 Netlify 适配器只依赖 **Web Platform API**（已由 polyfills 覆盖）。
 
 ### 2. 标准 Web API 接口
 
@@ -76,13 +76,14 @@ async function handler(
 ): Promise<Response>   // Web API Response
 ```
 
-`Request` / `Response` 是浏览器规范定义的标准类型，在 QJS 中可完整 polyfill，
+`Request` / `Response` 是浏览器规范定义的标准类型，在 goja 中可完整 polyfill，
 而无需模拟 `http.IncomingMessage` / `http.ServerResponse` 等 Node.js 特有类型。
 
 ### 3. 产物稳定，esbuild 可独立再打包
 
 Netlify 适配器的产物已经是 esbuild 打包的结果，但 entry 仍是 `.mjs` 格式（有 `import.meta`）。
-本项目在运行时用 esbuild 再次打包为纯 CJS，消除所有 ESM 语法，使 QJS 可以 `ctx.Eval` 一次完成加载。
+本项目在运行时用 esbuild 将其转换为 goja 兼容的 ESM（`ConvertBundleForGoja`，参见
+[docs/bundle.md](./bundle.md)），以模块方式一次性 eval 加载。
 
 ### 4. Netlify Context 可低成本 mock
 
@@ -100,7 +101,11 @@ Netlify 适配器的产物已经是 esbuild 打包的结果，但 entry 仍是 `
 
 ---
 
-## 运行时架构选择：Go + QuickJS
+## 运行时架构选择：Go + goja
+
+> **历史说明**：本项目早期曾同时支持 QuickJS（`dxkite/qjs`，经 wazero 运行 WASM）与
+> goja（`grafana/sobek`，纯 Go）两种引擎，通过 `EngineKind` 切换。QuickJS 引擎已从代码库
+> 中完全移除，goja 现在是唯一的 JS 引擎。
 
 ### 为何不用 Node.js 子进程
 
@@ -109,22 +114,28 @@ Netlify 适配器的产物已经是 esbuild 打包的结果，但 entry 仍是 `
 - 对宿主机 Node.js 版本的依赖（模板使用者可能没有 Node）
 - 进程崩溃传播、信号处理等复杂性
 
-### 为何选择 QuickJS（via wazero）
+### 为何选择 goja（`grafana/sobek`）
 
-| 属性 | QuickJS (qjs) | V8 (goja / otto) |
-|---|---|---|
-| ES 规范支持 | ES2023（QuickJS-NG） | ES5（otto）/ ES2020（goja） |
-| 异步（async/await） | ✅ 原生支持 | ❌（otto）/ 部分（goja） |
-| 无 CGO | ✅（via wazero WASM） | ❌（V8 binding 需要 CGO） |
-| 单文件二进制 | ✅ | ❌（V8 需要动态库） |
-| 性能 | 中等 | 中等 |
+| 属性 | goja / sobek |
+|---|---|
+| ES 规范支持 | 现代 ES（`for-await-of`/`async function*` 等需 esbuild 降级到 ES2017，见 docs/bundle.md） |
+| 异步（async/await） | ✅ 支持，但 `SetGoAsyncFunc` 注册的宿主函数在 goja 下是**同步**执行（见下方限制） |
+| 无 CGO | ✅ 纯 Go，无 CGO、无 WASM 运行时 |
+| 单文件二进制 | ✅ |
+| 冷启动 | 快（无 WASM 初始化、无字节码编译步骤，直接 eval 源码） |
 
-`dxkite/qjs`（QuickJS-NG via wazero）满足所有要求：
-- 纯 Go，无 CGO，单二进制分发
-- 完整 ES2023 + async/await 支持（Astro bundle 大量使用）
-- Pool 模型天然支持并发（每个 runtime 独立 JS heap）
-- 增加 `pendingCallbacks` channel、`SetGoAsyncFunc` / `RunAsync` 实现并发 fetch，
-  同时保持 wazero 的单线程约束
+goja/sobek 满足核心要求：纯 Go、无 CGO、单二进制分发、Pool 模型天然支持并发
+（每个 runtime 独立 JS heap，互不共享内存）。
+
+### 已知限制
+
+goja 的宿主函数绑定（`SetGoAsyncFunc`）在同一 goroutine 上**同步**执行——调用宿主函数时
+JS 引擎会阻塞直到该 Go 函数返回，返回值再包装成一个已完成（resolved）的 Promise。
+这与 QuickJS 时代"通过独立 goroutine + `pendingCallbacks` 实现真正并发"的模型不同，
+带来一个实际影响：JS 侧 `Promise.allSettled([fetch(a), fetch(b), fetch(c)])` 这类"并发发起
+多个 fetch"的写法，在 goja 下会退化为**顺序执行**（数组字面量按顺序求值，每个 `fetch()`
+调用内部的宿主函数调用会阻塞到对应请求完成后才返回）。需要真正并发的多路 fetch 场景，
+应在 Go 层（BFF 业务逻辑）用 goroutine 并发发起，而不是依赖 JS 侧的 `Promise.allSettled`。
 
 ### Pool 模型与 BFF Render
 

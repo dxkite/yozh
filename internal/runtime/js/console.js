@@ -1,5 +1,6 @@
-// Patch Error.stack to include name+message prefix (QJS omits it unlike V8).
-// Without this, Astro's logger logs `err.stack` and the error message is invisible.
+// Ensure Error.stack always includes the name+message prefix (a no-op if the
+// engine already includes it). Without this, Astro's logger logs `err.stack`
+// and the error message can be invisible.
 (function() {
   var origError = Error;
   var props = ['EvalError','RangeError','ReferenceError','SyntaxError','TypeError','URIError'];

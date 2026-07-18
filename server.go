@@ -17,7 +17,7 @@ import (
 
 // ── Runtime ───────────────────────────────────────────────────────────────────
 
-// Runtime combines a QJS pool and a static-asset FS into a single http.Handler.
+// Runtime combines a JS runtime pool and a static-asset FS into a single http.Handler.
 // Routing order: /.netlify/images → image CDN; static file → distFS; else → SSR pool.
 //
 // Create via NewRuntime; close with Close when done.
@@ -82,9 +82,9 @@ func WithDistDir(path string) RuntimeOption {
 	return func(c *runtimeConfig) { c.distDir = path }
 }
 
-// WithCacheDir sets a directory for persistent caching.
-// For pack sources: extracted to cacheDir/<sha256(pack)>/ (cache hit skips extraction).
-// For bundle sources: compiled QJS bytecodes cached as cacheDir/<hash>.bc.
+// WithCacheDir sets a directory for persistent pack-extraction caching.
+// Packs are extracted to cacheDir/<sha256(pack)>/ (cache hit skips extraction).
+// Ignored for bundle sources.
 func WithCacheDir(dir string) RuntimeOption {
 	return func(c *runtimeConfig) { c.cacheDir = dir }
 }
@@ -179,11 +179,7 @@ func NewRuntime(opts ...RuntimeOption) (*Runtime, error) {
 
 	case len(cfg.bundle) > 0:
 		distFS := cfg.distFS // may be nil
-		poolOpts := cfg.poolOpts
-		if cfg.cacheDir != "" {
-			poolOpts = append(poolOpts, WithBundleCache(cfg.cacheDir))
-		}
-		pool, err := NewPool(cfg.bundle, poolOpts...)
+		pool, err := NewPool(cfg.bundle, cfg.poolOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("pool init: %w", err)
 		}
@@ -196,12 +192,9 @@ func NewRuntime(opts ...RuntimeOption) (*Runtime, error) {
 		distFS = cfg.distFS
 	}
 
-	// Infer default engine from pack content; user-supplied opts can override.
 	var packOpts []PoolOption
-	if len(pc.bundleBC) > 0 {
-		packOpts = append(packOpts, WithPrecompiledBundle(pc.bundleBC), WithEngineKind(EngineQJS))
-	} else if len(pc.gojaCode) > 0 {
-		packOpts = append(packOpts, WithGojaBundle(pc.gojaCode), WithEngineKind(EngineGoja))
+	if len(pc.gojaCode) > 0 {
+		packOpts = append(packOpts, WithGojaBundle(pc.gojaCode))
 	}
 	poolOpts := append(packOpts, cfg.poolOpts...) // user opts override the above
 	pool, err := NewPool(nil, poolOpts...)

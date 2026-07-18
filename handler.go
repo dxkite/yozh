@@ -87,7 +87,7 @@ func (rc *RequestContext) release() {
 	rc.pool.Put(rc.prt)
 }
 
-// RequestContext creates a per-request execution context, checking out a pooled QJS runtime.
+// RequestContext creates a per-request execution context, checking out a pooled JS runtime.
 // The caller MUST pass the returned *RequestContext to HandleRequest, which releases the runtime.
 // Returns an error only if the pool is exhausted and cannot create a new runtime.
 func (p *Pool) RequestContext(w http.ResponseWriter, r *http.Request) (*RequestContext, error) {
@@ -101,7 +101,7 @@ func (p *Pool) RequestContext(w http.ResponseWriter, r *http.Request) (*RequestC
 		slog.String("user_agent", r.Header.Get("User-Agent")),
 	)
 
-	// Apply per-request timeout if configured so Await() in the QJS event loop
+	// Apply per-request timeout if configured so Await() in the JS event loop
 	// respects the deadline and releases the pool slot instead of looping forever.
 	var cancel context.CancelFunc
 	if p.requestTimeout > 0 {
@@ -207,12 +207,12 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// HandleRequest processes one HTTP request through the QJS SSR runtime held in rc.
+// HandleRequest processes one HTTP request through the SSR runtime held in rc.
 //
 // Eval runs in a worker goroutine. HandleRequest writes HTTP headers as soon as JS
 // calls __go_sendHeaders, then streams body chunks to the client via __go_sendChunk
 // as the Astro renderer emits them. After the stream ends the worker captures js.tail
-// (time the QJS runtime is held after the response body was fully sent), prints the
+// (time the JS runtime is held after the response body was fully sent), prints the
 // complete trace, and returns rc to the pool.
 func HandleRequest(rc *RequestContext) {
 	r := rc.r

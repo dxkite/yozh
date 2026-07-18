@@ -17,16 +17,9 @@ const (
 
 const (
 	EngineGoja EngineKind = jsruntime.EngineGoja
-	EngineQJS  EngineKind = jsruntime.EngineQJS
 )
 
 // ValidateEngineKind checks that the requested engine kind is available in this build.
 func ValidateEngineKind(kind EngineKind) error {
 	return jsruntime.ValidateEngineKind(kind)
-}
-
-// CompileBundleBytecode compiles bundleSrc to raw QuickJS module bytecode.
-// Only available when built with -tags qjs.
-func CompileBundleBytecode(bundleSrc []byte) ([]byte, error) {
-	return jsruntime.CompileBundleBytecode(bundleSrc)
 }

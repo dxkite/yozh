@@ -1,6 +1,6 @@
 # astro-runtime 文档索引
 
-用于网站模板 SSR + BFF Render 的 Go + QuickJS 运行时。
+用于网站模板 SSR + BFF Render 的 Go + goja 运行时。
 在不依赖任何云平台 CLI 的情况下，本地或服务端直接运行 `@astrojs/netlify` 适配器编译的 Astro SSR 函数。
 
 ## 文档列表
@@ -29,7 +29,7 @@ go build -o astro-runtime ./cmd
 ./astro-runtime serve --pack bundle.pack --port 8888
 
 # 方式二：bundle（预打包 .mjs + 独立 dist 目录）
-./astro-runtime build --plain --entry .netlify/build/entry.mjs --out bundle.mjs
+./astro-runtime build --entry .netlify/build/entry.mjs --out bundle.mjs
 ./astro-runtime serve --bundle bundle.mjs --dist dist --port 8888
 
 # 方式三：entry（实时打包，适合开发）
@@ -41,17 +41,18 @@ go build -o astro-runtime ./cmd
 ### `build` — 打包 Astro SSR 产物
 
 ```bash
-astro-runtime build [--plain | --bytecode | --pack] [--entry path] [--dist dir] [--out path]
+astro-runtime build [--pack] [--entry path] [--kind astro|react] [--dist dir] [--out path]
 ```
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--entry` | `.netlify/build/entry.mjs` | SSR entry 路径（先 `astro build`） |
+| `--kind` | `astro` | entry 类型：`astro`（Netlify SSR）或 `react`（JSX/TSX，浏览器条件） |
 | `--dist` | `dist` | 静态输出目录（`--pack` 时打包进去） |
-| `--plain` | — | 输出自包含 JS bundle（`.mjs`） |
-| `--bytecode` | — | 输出 QuickJS 字节码（`.bc`） |
-| `--pack` | — | 输出部署包（`.pack`，含 bundle.mjs + bundle.bc + dist/） |
-| `--out` | 依模式而定 | 输出路径 |
+| `--pack` | — | 输出部署包（`.pack`，含 bundle.mjs + dist/） |
+| `--out` | 依模式而定 | 输出路径（默认 `.netlify/build/bundle.mjs`，`--pack` 时默认 `.netlify/build/bundle.pack`） |
+
+不加 `--pack` 时默认输出自包含的 goja 格式 ESM bundle（`.mjs`）。
 
 ### `serve` — 启动 SSR 服务
 
@@ -66,7 +67,10 @@ astro-runtime serve [--pack path | --bundle path | --entry path] [--dist dir] [-
 | `--entry` | — | SSR entry（启动时实时打包） |
 | `--dist` | `dist` | 静态输出目录（--bundle/--entry 时使用） |
 | `--port` | `8888` | 监听端口 |
-| `--cache-dir` | `$XDG_CACHE_HOME/astro-runtime` | 字节码/pack 解压缓存目录（空字符串禁用） |
+| `--cache-dir` | `$XDG_CACHE_HOME/astro-runtime` | pack 解压缓存目录（空字符串禁用） |
+| `--pack-cache-size` | `0`（默认 3） | 最多保留的解压缓存目录数（负数为不限） |
+| `--bootstrap` | — | 自定义 bootstrap .js 文件路径 |
+| `--polyfill` | — | 替换全部内置 polyfill 的 JS 文件路径 |
 
 自动检测：未指定任何模式时，按 `bundle.pack` → `bundle.mjs` → `entry.mjs` 顺序探测。
 
@@ -108,13 +112,10 @@ pnpm build
 ```go
 import astroruntime "github.com/dxkite/astro-runtime"
 
-// 1. 从 entry.mjs 打包（esbuild + QJS 字节码）
+// 1. 从 entry.mjs 打包（esbuild）
 jsCode, err := astroruntime.BundleSSR("/path/to/entry.mjs")
 
-// 2. 编译字节码
-bc, err := astroruntime.CompileBundleBytecode(jsCode)
-
-// 3. 打包为 .pack（bundle.mjs + bundle.bc + dist/）
+// 2. 打包为 .pack（内部转换为 goja 格式，输出 bundle.mjs + dist/）
 err = astroruntime.BuildPack("out.pack", jsCode, "/path/to/dist")
 ```
 
@@ -175,5 +176,5 @@ http.ListenAndServe(":8080", mux)
 | `WithBundle(code []byte)` | 原始 JS bundle bytes |
 | `WithDistFS(fsys fs.FS)` | 静态资产 FS（bundle 模式时使用） |
 | `WithDistDir(path string)` | 静态资产目录（等同 WithDistFS(os.DirFS(path))） |
-| `WithCacheDir(dir string)` | 缓存目录（pack 解压 / 字节码缓存） |
+| `WithCacheDir(dir string)` | 缓存目录（pack 解压缓存） |
 | `WithPoolOptions(opts ...PoolOption)` | 传递 PoolOption（WithEnv、WithSize 等） |

@@ -1,5 +1,3 @@
-//go:build qjs
-
 package astroruntime
 
 import (
@@ -33,14 +31,14 @@ func TestRebuildTestdata(t *testing.T) {
 	}
 	t.Logf("bundle.mjs: %d bytes", len(bundleCode))
 
-	t.Log("Building QJS pack...")
-	if err := BuildPack(packOut, bundleCode, distDir, EngineQJS); err != nil {
+	t.Log("Building goja pack...")
+	if err := BuildPack(packOut, bundleCode, distDir); err != nil {
 		t.Fatalf("BuildPack: %v", err)
 	}
 	fi, _ := os.Stat(packOut)
 	t.Logf("example.pack: %d bytes", fi.Size())
 
-	t.Log("Verifying QJS pool...")
+	t.Log("Verifying goja pool...")
 	packData, err := os.ReadFile(packOut)
 	if err != nil {
 		t.Fatalf("read pack: %v", err)
@@ -49,12 +47,12 @@ func TestRebuildTestdata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open pack contents: %v", err)
 	}
-	t.Logf("bundleBC: %d bytes", len(pc.bundleBC))
+	t.Logf("gojaCode: %d bytes", len(pc.gojaCode))
 
-	qjsPool, err := NewPool(nil, WithPrecompiledBundle(pc.bundleBC), WithEngineKind(EngineQJS), WithSize(1))
+	gojaPool, err := NewPool(nil, WithGojaBundle(pc.gojaCode), WithSize(1))
 	if err != nil {
-		t.Fatalf("QJS pool: %v", err)
+		t.Fatalf("goja pool: %v", err)
 	}
-	qjsPool.Close()
-	t.Log("QJS pool OK")
+	gojaPool.Close()
+	t.Log("goja pool OK")
 }

@@ -1,6 +1,7 @@
 # Polyfill 详解
 
-QuickJS-NG（通过 wazero 运行）缺少大量浏览器/Node.js API。
+astro-runtime 唯一的 JS 引擎是 goja（`github.com/grafana/sobek`，纯 Go 实现），它本身是一个
+ECMAScript 引擎，缺少大量浏览器/Node.js 才有的运行时 API（Web API、Node 内建模块、Intl 等）。
 本文档列出每个 polyfill 的存在原因、覆盖边界和已知局限。
 
 ## 评估顺序
@@ -98,7 +99,7 @@ Astro 的 `applyPolyfills()` 在 bundle 初始化时检查 `if (!globalThis.cryp
 
 ### Blob
 
-QJS 无内置 Blob。实现：
+goja/sobek 无内置 Blob（`typeof Blob === 'undefined'`）。实现：
 ```javascript
 class Blob {
     constructor(parts, opts) { this._parts = parts || []; ... }
@@ -143,7 +144,8 @@ globalThis.setTimeout = function(fn, delay) {
 ```
 
 - 仅用 microtask 实现"延迟"，不是真正的宏任务调度
-- 非零 delay 同样立即执行（QJS 无 OS 定时器，SSR 中 delay 值通常无意义）
+- 非零 delay 同样立即执行（goja/sobek 没有原生 `setTimeout`/`clearTimeout`/`setInterval`，
+  也没有 OS 定时器或事件循环可以真正延迟；SSR 中 delay 值通常无意义）
 
 ### queueMicrotask
 
@@ -151,7 +153,7 @@ globalThis.setTimeout = function(fn, delay) {
 globalThis.queueMicrotask = function(fn) { Promise.resolve().then(fn); };
 ```
 
-web-streams-polyfill 内部用到此 API。
+goja/sobek 没有原生 `queueMicrotask`；web-streams-polyfill 内部用到此 API。
 
 ### btoa / atob
 
@@ -173,7 +175,8 @@ web-streams-polyfill 内部用到此 API。
 
 ## 5. intlStub（js/intl.js）
 
-QuickJS-NG 不包含 ECMA-402（Internationalization API）。
+goja/sobek 完全不包含 ECMA-402（Internationalization API）——不是"可能不支持某些 IANA 时区名称"，
+而是 `typeof Intl === 'undefined'`，整个 `Intl` 命名空间都不存在。
 Astro 的日志模块和某些日期格式化路径调用 `new Intl.DateTimeFormat()`。
 
 | API | 实现 |
@@ -190,8 +193,9 @@ locale 参数被接受但忽略，不支持本地化格式。
 
 ## 6. structuredCloneGuard（js/structured-clone.js）
 
-QuickJS-NG 已内置 `structuredClone`，此处仅为 fallback。
-JSON 往返实现不支持循环引用、`Date`、`Map`、`Set`、`RegExp` 等特殊类型。
+goja/sobek 没有内置 `structuredClone`（`typeof structuredClone === 'undefined'`）。
+这里用 JSON 往返实现兜底：`JSON.parse(JSON.stringify(v))`，不支持循环引用、`Date`、`Map`、`Set`、
+`RegExp` 等 JSON 不能表示的特殊类型。
 
 ---
 
@@ -205,8 +209,14 @@ if (a instanceof Error || (a && typeof a.message === 'string' && typeof a.stack 
 }
 ```
 
-**为何需要特殊处理**：QuickJS 中 Error 的 `message` 和 `stack` 属性为不可枚举，
-`JSON.stringify(error)` 返回 `{}`，错误信息完全丢失。
+**为何需要特殊处理**：goja/sobek 中 Error 的 `message` 和 `stack` 属性同样为不可枚举
+（`Object.getOwnPropertyDescriptor(err, 'message').enumerable === false`），
+`JSON.stringify(error)` 返回 `{}`，错误信息完全丢失，因此需要在 `fmtArg` 里对 `Error` 特殊处理。
+
+另外，console.js 顶部还有一段 `patchStack` 逻辑，用于确保 `err.stack` 以 `Name: message` 开头。
+实测 goja/sobek 抛出的 Error 的 `stack` 已经原生带有这个前缀（例如 `"Error: boom\n\tat ..."`），
+所以这段逻辑在 goja 下是无操作的空跑（no-op）；保留它是为了防御性兼容——万一某个 Error 子类或
+自定义 Error 的 `stack` 不带前缀，仍能被正确修正。
 
 ### 输出格式
 
@@ -250,7 +260,7 @@ globalThis.fetch(input, init)
 |---|---|
 | `WebSocket` | SSR 路径不需要 |
 | `EventSource` | SSR 路径不需要 |
-| `Worker` | QJS 无线程 |
+| `Worker` | goja/sobek 无原生线程支持，也没有 Worker/postMessage 的运行时基础 |
 | `IndexedDB` / `localStorage` | SSR 路径不需要 |
 | `Canvas` / `WebGL` | SSR 路径不需要 |
 | `Intl` 本地化格式 | stub 忽略 locale |

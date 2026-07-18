@@ -4,10 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"runtime"
-	"sync"
 	"time"
 
 	jsruntime "github.com/dxkite/astro-runtime/internal/runtime"
@@ -16,18 +13,12 @@ import (
 
 // poolConfig holds resolved configuration for NewPool.
 type poolConfig struct {
-	env               map[string]string
-	size              int
-	memoryLimit       int
-	maxStackSize      int
-	maxExecutionTime  int
-	gcThreshold       int
-	bundleCacheDir    string
-	precompiledBundle []byte
-	gojaBundle        []byte // IIFE-format bundle for goja engine (from pack's bundle-goja.mjs)
-	contextProvider   func(*http.Request) *NetlifyContext
-	requestTimeout    time.Duration // 0 = no timeout; applied per request via context.WithTimeout
-	engine            JSEngine      // nil → default qjs engine
+	env             map[string]string
+	size            int
+	gojaBundle      []byte // IIFE-format bundle for goja engine (from pack's bundle-goja.mjs)
+	contextProvider func(*http.Request) *NetlifyContext
+	requestTimeout  time.Duration // 0 = no timeout; applied per request via context.WithTimeout
+	engine          JSEngine      // nil → default goja engine
 	bootstrap string // custom bootstrap JS source; "" = use built-in astro bootstrap
 	polyfill  string // custom polyfill JS source; when non-empty, replaces all built-in polyfills
 	selfURL   string // internal base URL for relative fetch resolution (e.g. http://127.0.0.1:8080)
@@ -47,47 +38,10 @@ func WithSize(size int) PoolOption {
 	return func(c *poolConfig) { c.size = size }
 }
 
-// WithMemoryLimit caps the WASM heap per runtime in bytes. 0 = no limit. QJS only.
-func WithMemoryLimit(bytes int) PoolOption {
-	return func(c *poolConfig) { c.memoryLimit = bytes }
-}
-
-// WithMaxStackSize caps the JS call stack per runtime in bytes. 0 = default (256 KB). QJS only.
-func WithMaxStackSize(bytes int) PoolOption {
-	return func(c *poolConfig) { c.maxStackSize = bytes }
-}
-
-// WithMaxExecutionTime caps a single Eval call in milliseconds. 0 = no limit. QJS only.
-func WithMaxExecutionTime(ms int) PoolOption {
-	return func(c *poolConfig) { c.maxExecutionTime = ms }
-}
-
-// WithGCThreshold controls the GC trigger threshold in bytes. 0 = default. QJS only.
-func WithGCThreshold(bytes int) PoolOption {
-	return func(c *poolConfig) { c.gcThreshold = bytes }
-}
-
 // WithGojaBundle sets the IIFE-format JS source used by the goja engine when the pool
-// is loaded from a .pack file (which provides QJS bytecodes but no IIFE source).
-// Ignored by the QJS engine. When unset, the main bundleCode passed to NewPool is used.
+// is loaded from a .pack file. When unset, the main bundleCode passed to NewPool is used.
 func WithGojaBundle(code []byte) PoolOption {
 	return func(c *poolConfig) { c.gojaBundle = code }
-}
-
-// WithPrecompiledBundle sets pre-compiled raw QuickJS bytecode for bundle.mjs.
-// Polyfills and glue are still compiled fresh on each pool init (fast, < 5 ms).
-// Use when the bundle.bc is already available (e.g. loaded from a .pack file).
-// Ignored when engine does not support bytecode.
-func WithPrecompiledBundle(bc []byte) PoolOption {
-	return func(c *poolConfig) { c.precompiledBundle = bc }
-}
-
-// WithBundleCache enables raw bundle bytecode disk caching in dir.
-// Cache key = SHA256(bundle source + vcs.revision); a Go rebuild or bundle change
-// produces a cache miss. Pass an empty string to disable (default).
-// Ignored when engine does not support bytecode.
-func WithBundleCache(dir string) PoolOption {
-	return func(c *poolConfig) { c.bundleCacheDir = dir }
 }
 
 // WithContextProvider registers a per-request NetlifyContext builder.
@@ -129,15 +83,11 @@ func WithPolyfill(src string) PoolOption {
 }
 
 // WithEngine sets a custom JSEngine implementation for the pool.
-// The provided engine is used as-is; engine-specific options (WithMemoryLimit, etc.)
-// are ignored if the engine was already configured externally.
 func WithEngine(engine JSEngine) PoolOption {
 	return func(c *poolConfig) { c.engine = engine }
 }
 
 // WithEngineKind selects the JS engine by kind using default options.
-// QJS-specific options (WithMemoryLimit, WithMaxStackSize, etc.) are applied
-// automatically for EngineQJS. For EngineGoja they are silently ignored.
 func WithEngineKind(kind EngineKind) PoolOption {
 	return func(c *poolConfig) {
 		c.engine = &kindSentinel{kind: kind}
@@ -148,8 +98,7 @@ func WithEngineKind(kind EngineKind) PoolOption {
 // NewPool replaces it with the real engine constructed from poolConfig.
 type kindSentinel struct{ kind EngineKind }
 
-func (*kindSentinel) New() (JSRuntime, error)   { panic("kindSentinel.New called") }
-func (*kindSentinel) SupportsBytecode() bool    { panic("kindSentinel.SupportsBytecode called") }
+func (*kindSentinel) New() (JSRuntime, error) { panic("kindSentinel.New called") }
 
 // pooledRuntime wraps a JS runtime with a per-request streaming channel.
 // streamCh is allocated fresh by HandleRequest before each request.
@@ -161,19 +110,14 @@ type pooledRuntime struct {
 
 // Pool manages a set of pre-warmed JS runtimes and a fixed-size eval worker pool.
 type Pool struct {
-	pool              chan *pooledRuntime
-	workers           chan func()
-	bundleCode        []byte
-	gojaBundle        []byte // IIFE bundle for goja; falls back to bundleCode when nil
-	bcs               *jsruntime.BytecodeSet
-	bcsOnce           sync.Once
-	bcsErr            error
-	engine            JSEngine
-	env               map[string]string
-	bundleCacheDir    string
-	precompiledBundle []byte
-	contextProvider   func(*http.Request) *NetlifyContext
-	requestTimeout    time.Duration
+	pool            chan *pooledRuntime
+	workers         chan func()
+	bundleCode      []byte
+	gojaBundle      []byte // IIFE bundle for goja; falls back to bundleCode when nil
+	engine          JSEngine
+	env             map[string]string
+	contextProvider func(*http.Request) *NetlifyContext
+	requestTimeout  time.Duration
 	bootstrap string // custom bootstrap source; "" = use built-in astro bootstrap
 	polyfill  string // custom polyfill source; "" = use built-in polyfills
 	selfURL   string // internal base URL for relative fetch resolution
@@ -185,9 +129,7 @@ type Pool struct {
 //  3. The ESM SSR bundle loaded in module mode (sets globalThis.__ssrHandler)
 //  4. The JS glue adapter (defines globalThis.__handleRequest)
 //
-// For QJS: JS source is compiled to bytecode on the first runtime (via sync.Once);
-// all subsequent runtimes reuse the same bytecodes.
-// For goja: source strings are evaluated directly; bytecode is not used.
+// Source strings are evaluated directly in each runtime; no bytecode compilation is used.
 func NewPool(bundleCode []byte, opts ...PoolOption) (*Pool, error) {
 	cfg := &poolConfig{}
 	for _, o := range opts {
@@ -213,27 +155,23 @@ func NewPool(bundleCode []byte, opts ...PoolOption) (*Pool, error) {
 		env = map[string]string{}
 	}
 
-	// Resolve the engine: if a kindSentinel was set, build the real engine now
-	// that all options (memory limit, stack size, etc.) are available.
+	// Resolve the engine: if a kindSentinel was set, build the real engine now.
 	eng := cfg.engine
 	if eng == nil {
-		eng = jsruntime.NewEngineForKind(jsruntime.DefaultEngineKind(),
-			cfg.memoryLimit, cfg.maxStackSize, cfg.maxExecutionTime, cfg.gcThreshold)
+		eng = jsruntime.NewEngineForKind(jsruntime.DefaultEngineKind())
 	} else if sentinel, ok := eng.(*kindSentinel); ok {
-		eng = jsruntime.NewEngineForKind(sentinel.kind, cfg.memoryLimit, cfg.maxStackSize, cfg.maxExecutionTime, cfg.gcThreshold)
+		eng = jsruntime.NewEngineForKind(sentinel.kind)
 	}
 
 	p := &Pool{
-		pool:              make(chan *pooledRuntime, size),
-		workers:           make(chan func(), size*2),
-		bundleCode:        bundleCode,
-		gojaBundle:        cfg.gojaBundle,
-		engine:            eng,
-		env:               env,
-		bundleCacheDir:    cfg.bundleCacheDir,
-		precompiledBundle: cfg.precompiledBundle,
-		contextProvider:   cfg.contextProvider,
-		requestTimeout:    cfg.requestTimeout,
+		pool:            make(chan *pooledRuntime, size),
+		workers:         make(chan func(), size*2),
+		bundleCode:      bundleCode,
+		gojaBundle:      cfg.gojaBundle,
+		engine:          eng,
+		env:             env,
+		contextProvider: cfg.contextProvider,
+		requestTimeout:  cfg.requestTimeout,
 		bootstrap: cfg.bootstrap,
 		polyfill:  cfg.polyfill,
 		selfURL:   cfg.selfURL,
@@ -264,48 +202,16 @@ func NewPool(bundleCode []byte, opts ...PoolOption) (*Pool, error) {
 }
 
 // newRuntime creates and initializes a fresh JS runtime.
-// For QJS: bytecodes are compiled once on the first call (via sync.Once) and reused.
-// For goja: source strings are stored and eval'd per runtime.
+// Source strings are stored and eval'd per runtime.
 func (p *Pool) newRuntime() (*pooledRuntime, error) {
 	rt, err := p.engine.New()
 	if err != nil {
 		return nil, err
 	}
 
-	if p.engine.SupportsBytecode() {
-		p.bcsOnce.Do(func() {
-			bundleBC := p.precompiledBundle
-
-			if bundleBC == nil && p.bundleCacheDir != "" {
-				key := jsruntime.BundleCacheKey(p.bundleCode)
-				cachePath := filepath.Join(p.bundleCacheDir, key+".bc")
-				if bc, err := os.ReadFile(cachePath); err == nil {
-					rtlog.Debug("bundle cache hit", "path", cachePath)
-					bundleBC = bc
-				}
-			}
-
-			p.bcs, p.bcsErr = jsruntime.CompileBytecodes(rt.Ctx(), p.bundleCode, bundleBC)
-
-			if p.bcsErr == nil && p.bundleCacheDir != "" && p.precompiledBundle == nil && bundleBC == nil {
-				key := jsruntime.BundleCacheKey(p.bundleCode)
-				cachePath := filepath.Join(p.bundleCacheDir, key+".bc")
-				if mkErr := os.MkdirAll(p.bundleCacheDir, 0755); mkErr == nil {
-					if saveErr := os.WriteFile(cachePath, p.bcs.Bundle, 0644); saveErr == nil {
-						rtlog.Debug("bundle cache saved", "path", cachePath)
-					}
-				}
-			}
-		})
-		if p.bcsErr != nil {
-			rt.Close()
-			return nil, fmt.Errorf("compile bytecodes: %w", p.bcsErr)
-		}
-	}
-
-	// For goja engine, prefer the explicit IIFE bundle; fall back to bundleCode.
+	// Prefer the explicit IIFE bundle (e.g. from a .pack file); fall back to bundleCode.
 	bundleSrc := p.bundleCode
-	if !p.engine.SupportsBytecode() && len(p.gojaBundle) > 0 {
+	if len(p.gojaBundle) > 0 {
 		bundleSrc = p.gojaBundle
 	}
 
@@ -335,14 +241,13 @@ func (p *Pool) newRuntime() (*pooledRuntime, error) {
 	}
 
 	if err := jsruntime.SetupRuntime(ctx, jsruntime.SetupOptions{
-		BCS:           p.bcs,
 		Bundle:        bundleSrc,
 		Env:           p.env,
 		Stream:        streamCallbacks,
 		Bootstrap: p.bootstrap,
 		Polyfill:  p.polyfill,
 		SelfURL:   p.selfURL,
-	}, p.engine); err != nil {
+	}); err != nil {
 		rt.Close()
 		return nil, err
 	}

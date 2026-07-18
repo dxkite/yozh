@@ -1,5 +1,3 @@
-//go:build qjs
-
 package integration_test
 
 import (
@@ -9,7 +7,7 @@ import (
 )
 
 // benchBundle is a realistic-shape bundle: evaluates polyfills, registers a handler.
-var benchBundle = []byte(`
+var benchBundle = mustGojaBundle(`
 export default function(config) {
     return async function handler(request, context) {
         var url = new URL(request.url);
@@ -24,7 +22,7 @@ export default function(config) {
 }
 `)
 
-// BenchmarkNewPool measures time to compile bytecodes + create one pool worker.
+// BenchmarkNewPool measures time to create one pool worker.
 // Each iteration creates a fresh pool with size=1.
 func BenchmarkNewPool(b *testing.B) {
 	b.ReportAllocs()
@@ -38,7 +36,6 @@ func BenchmarkNewPool(b *testing.B) {
 }
 
 // BenchmarkNewPoolSize4 measures pool creation with 4 workers.
-// Shows how bytecode reuse amortizes compilation across workers.
 func BenchmarkNewPoolSize4(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {

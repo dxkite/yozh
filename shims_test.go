@@ -1,17 +1,16 @@
-//go:build qjs
-
 package astroruntime
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
-	"github.com/dxkite/qjs"
+	"github.com/grafana/sobek"
 )
 
-// shimRun creates a fresh QJS context, applies optional setup code, registers
-// the named shim file as an ES module, then evals testCode (also a module)
-// that imports from the shim and writes boolean assertions to globalThis.__T.
+// shimRun creates a fresh goja (sobek) runtime, applies optional setup code, registers
+// the named shim file as an ES module, then evals testCode (also a module) that imports
+// from the shim and writes boolean assertions to globalThis.__T.
 // Returns the assertion map; any false entry fails the test via checkT.
 func shimRun(t *testing.T, shimFile, setup, testCode string) map[string]bool {
 	t.Helper()
@@ -19,48 +18,58 @@ func shimRun(t *testing.T, shimFile, setup, testCode string) map[string]bool {
 	if err != nil {
 		t.Fatalf("read shim %s: %v", shimFile, err)
 	}
-	rt, err := qjs.New()
-	if err != nil {
-		t.Fatal("qjs.New:", err)
-	}
-	defer rt.Close()
-	ctx := rt.Context()
+	rt := sobek.New()
 
 	// Global assertion collector used by all test modules.
-	v, err := ctx.Eval("_init.js", qjs.Code("globalThis.__T = {};"))
-	if err != nil {
+	if _, err := rt.RunScript("_init.js", "globalThis.__T = {};"); err != nil {
 		t.Fatalf("init eval: %v", err)
 	}
-	v.Free()
 
 	if setup != "" {
-		v, err = ctx.Eval("_setup.js", qjs.Code(setup))
-		if err != nil {
+		if _, err := rt.RunScript("_setup.js", setup); err != nil {
 			t.Fatalf("setup eval: %v", err)
 		}
-		v.Free()
 	}
 
-	// Register shim in the module cache under its file name.
-	v, err = ctx.Eval(shimFile, qjs.Code(string(data)), qjs.TypeModule())
-	if err != nil {
-		t.Fatalf("eval shim %s: %v", shimFile, err)
+	// Module cache: resolve() serves the pre-parsed shim module by its file name;
+	// no other specifiers are supported.
+	modules := map[string]sobek.ModuleRecord{}
+	resolve := func(_ any, specifier string) (sobek.ModuleRecord, error) {
+		if m, ok := modules[specifier]; ok {
+			return m, nil
+		}
+		return nil, fmt.Errorf("module not found: %s", specifier)
 	}
-	v.Free()
+
+	shimMod, err := sobek.ParseModule(shimFile, string(data), resolve)
+	if err != nil {
+		t.Fatalf("parse shim %s: %v", shimFile, err)
+	}
+	modules[shimFile] = shimMod
 
 	// Test module imports the shim and populates globalThis.__T.
-	v, err = ctx.Eval("_test.mjs", qjs.Code(testCode), qjs.TypeModule())
+	testMod, err := sobek.ParseModule("_test.mjs", testCode, resolve)
 	if err != nil {
-		t.Fatalf("eval test module: %v", err)
+		t.Fatalf("parse test module: %v", err)
 	}
-	v.Free()
+	if err := testMod.Link(); err != nil {
+		t.Fatalf("link test module: %v", err)
+	}
+	promise := testMod.Evaluate(rt)
+	switch promise.State() {
+	case sobek.PromiseStateFulfilled:
+		// ok
+	case sobek.PromiseStateRejected:
+		t.Fatalf("eval test module: %v", promise.Result())
+	default:
+		t.Fatalf("eval test module: evaluation left pending Promise")
+	}
 
 	// Serialise results.
-	v, err = ctx.Eval("_read.js", qjs.Code("JSON.stringify(globalThis.__T)"))
+	v, err := rt.RunScript("_read.js", "JSON.stringify(globalThis.__T)")
 	if err != nil {
 		t.Fatalf("read results: %v", err)
 	}
-	defer v.Free()
 
 	var results map[string]bool
 	if err := json.Unmarshal([]byte(v.String()), &results); err != nil {
@@ -448,7 +457,8 @@ T.Response_exported     = typeof h2.Http2ServerResponse === 'function';
 // ── node-url.js ──────────────────────────────────────────────────────────────
 
 func TestShimURL(t *testing.T) {
-	// QJS does not ship URL/URLSearchParams built-in; provide minimal mocks.
+	// goja/sobek ships a native URL/URLSearchParams; the shim test still exercises
+	// the fallback-mock path so the assertions stay identical across engines.
 	setup := `
 if (typeof globalThis.URL === 'undefined') {
   globalThis.URL = function URL(u, base) {

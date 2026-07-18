@@ -1,5 +1,3 @@
-//go:build qjs
-
 package integration_test
 
 import (
@@ -25,12 +23,24 @@ var (
 	sessionPool *astroruntime.Pool    // testapp-ssr bundle, size=1, for TestCartSession (requires single runtime)
 	minPool     *astroruntime.Pool    // eval-based minimal bundle, size=4, for polyfill/crypto/BFF tests
 	packRT      *astroruntime.Runtime // pack-based Runtime, for pack smoke tests
-	gojaPool    *astroruntime.Pool    // goja engine, IIFE bench bundle, size=4, for engine comparison benchmarks
+	gojaPool    *astroruntime.Pool    // synthetic IIFE bench bundle, size=4, for HTTP benchmarks
 )
+
+// mustGojaBundle wraps a hand-written test fixture (bare `export default`/`export function`
+// ESM, written against the Netlify-adapter export shape) through ConvertBundleForGoja so it
+// sets globalThis.__ssrEntry as a side effect — required by bootstrap-astro.js, which reads
+// __ssrEntry rather than statically importing the bundle module.
+func mustGojaBundle(esm string) []byte {
+	out, err := astroruntime.ConvertBundleForGoja([]byte(esm))
+	if err != nil {
+		panic("ConvertBundleForGoja: " + err.Error())
+	}
+	return out
+}
 
 // minBundle is a minimal ESM bundle that evals arbitrary JS expressions via query param,
 // used by polyfill, crypto, and BFF tests to drive the runtime without a real Astro app.
-var minBundle = []byte(`
+var minBundle = mustGojaBundle(`
 export default function(config) {
     return async function handler(request, context) {
         var url = new URL(request.url);
@@ -501,8 +511,8 @@ func TestGetRandomValues(t *testing.T) {
 	}
 }
 
-func TestPolyfillsQJSInit(t *testing.T) {
-	bundle := []byte(`export default function() { return async function(req) { return new Response('ok'); }; }`)
+func TestPolyfillsInit(t *testing.T) {
+	bundle := mustGojaBundle(`export default function() { return async function(req) { return new Response('ok'); }; }`)
 	_, err := astroruntime.NewPool(bundle, astroruntime.WithSize(2))
 	if err != nil {
 		t.Fatalf("pool init failed (polyfill error): %v", err)
@@ -513,7 +523,7 @@ func TestPolyfillsQJSInit(t *testing.T) {
 
 // TestPoolSizeValidation verifies that invalid pool sizes are rejected.
 func TestPoolSizeValidation(t *testing.T) {
-	bundle := []byte(`export default function() { return async function(req) { return new Response('ok'); }; }`)
+	bundle := mustGojaBundle(`export default function() { return async function(req) { return new Response('ok'); }; }`)
 	cases := []struct {
 		size int
 		ok   bool
@@ -538,7 +548,7 @@ func TestPoolSizeValidation(t *testing.T) {
 // TestEmptyBodyPOST verifies that an explicit empty POST body is passed as ""
 // rather than null, so JS handlers can distinguish "no body" from "empty body".
 func TestEmptyBodyPOST(t *testing.T) {
-	bundle := []byte(`
+	bundle := mustGojaBundle(`
 export default function() {
   return async function(req) {
     var body = await req.text();
@@ -1021,7 +1031,7 @@ func TestTextEncoderInto(t *testing.T) {
 // ── NetlifyContext injection tests ────────────────────────────────────────────
 
 // contextBundle is a minimal bundle whose handler returns the full Netlify context as JSON.
-var contextBundle = []byte(`
+var contextBundle = mustGojaBundle(`
 export default function() {
   return async function handler(request, context) {
     return new Response(JSON.stringify({
@@ -1256,21 +1266,21 @@ func TestNetlifyAdapterFormats(t *testing.T) {
 		{
 			name:     "default_export_factory",
 			wantBody: "default-factory",
-			bundle: []byte(`export default function factory(opts) {
+			bundle: mustGojaBundle(`export default function factory(opts) {
   return async function(request, context) { return new Response('default-factory'); };
 }`),
 		},
 		{
 			name:     "default_export_handler",
 			wantBody: "default-handler",
-			bundle: []byte(`export default async function handler(request, context) {
+			bundle: mustGojaBundle(`export default async function handler(request, context) {
   return new Response('default-handler');
 }`),
 		},
 		{
 			name:     "named_createHandler_v6",
 			wantBody: "named-createHandler",
-			bundle: []byte(`export function createHandler(opts) {
+			bundle: mustGojaBundle(`export function createHandler(opts) {
   return async function(request, context) { return new Response('named-createHandler'); };
 }`),
 		},
@@ -1296,7 +1306,7 @@ func TestNetlifyAdapterFormats(t *testing.T) {
 // TestContextJSProviderHook verifies that globalThis.__netlifyContextProvider registered in
 // the SSR bundle can override raw context fields at request time.
 func TestContextJSProviderHook(t *testing.T) {
-	bundle := []byte(`
+	bundle := mustGojaBundle(`
 export default function() {
   globalThis.__netlifyContextProvider = function(rawCtx, req) {
     return Object.assign({}, rawCtx, {ip: 'js-injected-ip', requestId: 'js-injected-id'});

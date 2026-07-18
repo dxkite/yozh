@@ -1,5 +1,3 @@
-//go:build qjs
-
 package astroruntime
 
 import (
@@ -7,9 +5,9 @@ import (
 	"testing"
 )
 
-// TestRebuildPackQJS rebuilds example.pack as a QJS pack from bundle.mjs.
-// Run with UPDATE_TESTDATA=1 whenever bundle.mjs or QJS bytecodes need updating.
-func TestRebuildPackQJS(t *testing.T) {
+// TestRebuildPackGoja rebuilds example.pack as a goja pack from bundle.mjs.
+// Run with UPDATE_TESTDATA=1 whenever bundle.mjs needs updating.
+func TestRebuildPackGoja(t *testing.T) {
 	if os.Getenv("UPDATE_TESTDATA") == "" {
 		t.Skip("set UPDATE_TESTDATA=1 to rebuild testdata")
 	}
@@ -19,24 +17,24 @@ func TestRebuildPackQJS(t *testing.T) {
 	}
 
 	outPath := "integration/testdata/example/example.pack"
-	if err := BuildPack(outPath, bundleSrc, "", EngineQJS); err != nil {
+	if err := BuildPack(outPath, bundleSrc, ""); err != nil {
 		t.Fatalf("BuildPack: %v", err)
 	}
 
 	fi, _ := os.Stat(outPath)
-	t.Logf("rebuilt QJS pack: %d bytes", fi.Size())
+	t.Logf("rebuilt goja pack: %d bytes", fi.Size())
 
 	packData, _ := os.ReadFile(outPath)
 	pc, err := openPackContentsInMemory(packData)
 	if err != nil {
 		t.Fatal("open pack:", err)
 	}
-	t.Logf("bundleBC: %d bytes", len(pc.bundleBC))
+	t.Logf("gojaCode: %d bytes", len(pc.gojaCode))
 
-	pool, err := NewPool(nil, WithPrecompiledBundle(pc.bundleBC), WithEngineKind(EngineQJS), WithSize(1))
+	pool, err := NewPool(nil, WithGojaBundle(pc.gojaCode), WithSize(1))
 	if err != nil {
-		t.Fatalf("QJS pool: %v", err)
+		t.Fatalf("goja pool: %v", err)
 	}
 	pool.Close()
-	t.Log("QJS pool OK")
+	t.Log("goja pool OK")
 }

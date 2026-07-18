@@ -26,8 +26,7 @@ type StreamCallbacks struct {
 
 // SetupOptions configures a single JS runtime initialization.
 type SetupOptions struct {
-	BCS           *BytecodeSet      // nil = goja source path
-	Bundle        []byte            // goja: ESM bundle source
+	Bundle        []byte            // ESM bundle source
 	Env           map[string]string
 	Stream        StreamCallbacks
 	Bootstrap string // custom bootstrap source; "" = use built-in astro bootstrap
@@ -45,7 +44,7 @@ func resolveBootstrap(opts SetupOptions) string {
 
 // SetupRuntime initializes a single JS runtime.
 // Order: host functions → stream callbacks → polyfills → bundle → bootstrap.
-func SetupRuntime(ctx JSContext, opts SetupOptions, engine JSEngine) error {
+func SetupRuntime(ctx JSContext, opts SetupOptions) error {
 	keyReg := make(map[string]*cryptoKey)
 
 	if err := injectHostFunctions(ctx, opts.Env, keyReg); err != nil {

@@ -1,7 +1,7 @@
 // Timezone-aware Intl polyfill.
 // date-fns-tz uses Intl.DateTimeFormat.formatToParts to compute IANA timezone offsets.
-// QJS native Intl may be absent or may not support the timeZone option with IANA names;
-// this always overrides DateTimeFormat with a fixed-offset implementation.
+// goja (sobek) has no native Intl at all; this always overrides DateTimeFormat with a
+// fixed-offset implementation.
 (function () {
   // Fixed UTC offset (minutes) for common IANA timezone names.
   // DST is intentionally ignored: Asia/Shanghai (the primary timezone here) has no DST.
@@ -112,8 +112,8 @@
     };
   }
 
-  // Always override DateTimeFormat: QJS native Intl may not support IANA timezone names,
-  // causing date-fns-tz's tzParseTimezone to return NaN and throw RangeError.
+  // Always override DateTimeFormat: without this, date-fns-tz's tzParseTimezone
+  // has no IANA timezone data to work from and would return NaN and throw RangeError.
   globalThis.Intl.DateTimeFormat = makeDTF;
   globalThis.Intl.DateTimeFormat.supportedLocalesOf = function () { return []; };
 })();

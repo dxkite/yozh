@@ -1,4 +1,4 @@
-// glue.js — Go ↔ QJS bridge.
+// glue.js — Go ↔ JS runtime bridge.
 //
 // Defines globalThis.__handleRequest(requestJSON: string): Promise<string>
 //

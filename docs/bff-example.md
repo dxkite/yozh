@@ -318,7 +318,7 @@ export const POST: APIRoute = async ({ request, cookies }) => {
 server.go — 静态文件未命中
     │
     ▼
-handler.go → QJS/Astro middleware.ts（验证 session cookie）
+handler.go → goja/Astro middleware.ts（验证 session cookie）
     │ locals.userId = "user123"
     ▼
 pages/products/[id].astro
@@ -346,43 +346,39 @@ Go HTTP Response → 浏览器
 |---|---|
 | **无原生 Node 模块** | `fs`、`child_process` 不可用；文件操作需通过上游 HTTP 服务 |
 | **fetch 超时 30 秒** | 上游服务应有独立超时控制，避免单服务超时阻塞全页 |
-| **无共享内存** | 多个 QJS runtime 实例不共享内存，跨请求的共享状态（计数、缓存）需外部存储（Redis、DB） |
-| **CPU 密集任务** | 大量 JSON 处理、加解密建议移到 Go 层；QJS 单线程，长时间占用会阻塞同一 runtime 的其他请求 |
-| **fetch 并发** | `Promise.allSettled([fetch(a), fetch(b)])` 支持真正并发，3×80ms ≈ 83ms（见 `TestBFFConcurrentFetch`） |
+| **无共享内存** | 多个 goja runtime 实例不共享内存，跨请求的共享状态（计数、缓存）需外部存储（Redis、DB） |
+| **CPU 密集任务** | 大量 JSON 处理、加解密建议移到 Go 层；goja runtime 单线程执行，长时间占用会阻塞同一 runtime 的其他请求 |
+| **fetch 并发** | `Promise.allSettled([fetch(a), fetch(b)])` 仍是多上游调用做失败隔离的正确写法（见下文）；但当前 goja 引擎下同一请求内的多次 `await fetch()` 是顺序执行的，总耗时接近各请求耗时之和 |
 
 ---
 
-## fetch 并发实现
+## Pool 的 runtime 独占模型
 
 ### 原理
 
-astro-runtime 使用 [wazero](https://wazero.io/) 将 QuickJS 编译为 WASM 运行。wazero 的 WASM 实例**不是线程安全的** — 所有对 WASM 实例的调用必须来自同一 goroutine。
+astro-runtime 现在唯一的 JS 引擎是 goja（`github.com/grafana/sobek`），纯 Go 实现，没有 WASM 边界。
+但和大多数 JS 引擎一样，一个 `sobek.Runtime` **不是并发安全的** — 不能有两个 goroutine 同时对同一个
+`Runtime` 调用 `RunScript` / 触发 JS 执行，否则会破坏其内部状态。
 
-`fetch()` 通过 `SetGoAsyncFunc` 实现并发，核心机制为 `pendingCallbacks chan func()`：
+`Pool` 通过"每个请求独占一个 runtime"解决这个约束：
 
-```
-QJS goroutine（持有 WASM 实例）            Go 工作 goroutine（不接触 WASM）
-─────────────────────────────            ──────────────────────────────
-fetch(url) 被 JS 调用
-  → 提取参数字符串
-  → 创建 JS Promise
-  → 启动 goroutine ──────────────────►  执行 HTTP 请求（fetchClient.Do）
-  → 立即返回 undefined                   完成后将 resolve/reject 写入
-                                         pendingCallbacks channel
+- `Pool` 预热并持有 `size` 个 `sobek.Runtime`（`pool chan *pooledRuntime`）。
+- 请求进来时 `Pool.Get()` 从 channel 取出一个空闲 runtime；`Get()` 会阻塞直到有 runtime 可用（有界阻塞语义，见 `pool.go`）。
+- 该 runtime 的 JS 执行（`ctx.Eval(...)`）被提交给一个 worker goroutine（`Pool.submit`），由这一个 goroutine
+  独占持有该 runtime，直到本次请求的整个 JS 调用（包括其中所有 `await`）返回。
+- 请求结束后 `Pool.Put()` 把 runtime 放回 channel，供下一个请求复用。
 
-JS: Promise.allSettled([...]) 挂起
-  → 调用 Await() 轮询循环：
-    drain channel → 在 QJS goroutine 上调用 resolve/reject（WASM 安全）
-    运行 QJS microtasks（QJS_ExecutePendingJob）
-    检查 Promise 是否已 settled
-```
+这样，任意时刻每个 `sobek.Runtime` 至多被一个 goroutine 访问，天然满足"一个 JS runtime、一次只能一个
+goroutine"的约束，且不需要任何 WASM/wazero 相关的线程隔离机制。
 
-所有 WASM 调用始终在 QJS goroutine 上发生，满足 wazero 单线程要求；HTTP 请求在独立 goroutine 中并发执行。
+### fetch() 的执行模型
 
-### 并发效果
+goja 的 `SetGoAsyncFunc`（用于注册 `__go_fetchRaw` 等宿主函数）在 sobek 下是**同步执行**的：调用宿主函数时，
+Go 侧会阻塞当前 goroutine 直到该函数返回（`__go_fetchRaw` 内部就是一次阻塞式 `fetchClient.Do(req)`），然后才把
+结果包装成一个已 resolve 的 Promise 交还给 JS——没有额外的调度或后台 goroutine。
 
 ```typescript
-// ✅ 真正并发：三个请求同时发出，总耗时 ≈ 最慢单个请求的时间
+// Promise.allSettled 仍是失败隔离的正确写法：任一上游失败不影响其它上游的结果
 const [product, inventory, reviews] = await Promise.allSettled([
   upstreamGet<Product>(`${base.catalog}/products/${id}`),
   upstreamGet<Inventory>(`${base.inventory}/stock/${id}`),
@@ -390,4 +386,6 @@ const [product, inventory, reviews] = await Promise.allSettled([
 ]);
 ```
 
-实测（`TestBFFConcurrentFetch`）：3 个各 80ms 的请求，总耗时 ≈ 83ms，而非 240ms。
+但由于 `await fetch(...)` 是同步阻塞调用，同一请求内的多次 fetch **目前是顺序执行**，总耗时接近各请求耗时之和，
+而不是取最慢单个请求的时间。若要恢复真正的并发上游调用，需要在 Go 层引入新的调度机制（例如让宿主函数在独立
+goroutine 中执行并通过某种方式把控制权还给 JS 事件循环），目前尚未实现。
