@@ -348,7 +348,7 @@ Go HTTP Response → 浏览器
 | **fetch 超时 30 秒** | 上游服务应有独立超时控制，避免单服务超时阻塞全页 |
 | **无共享内存** | 多个 goja runtime 实例不共享内存，跨请求的共享状态（计数、缓存）需外部存储（Redis、DB） |
 | **CPU 密集任务** | 大量 JSON 处理、加解密建议移到 Go 层；goja runtime 单线程执行，长时间占用会阻塞同一 runtime 的其他请求 |
-| **fetch 并发** | `Promise.allSettled([fetch(a), fetch(b)])` 仍是多上游调用做失败隔离的正确写法（见下文）；但当前 goja 引擎下同一请求内的多次 `await fetch()` 是顺序执行的，总耗时接近各请求耗时之和 |
+| **fetch 并发** | `Promise.allSettled([fetch(a), fetch(b)])` 是多上游调用做失败隔离的正确写法，且真正并发发起（见下文） |
 
 ---
 
@@ -373,12 +373,16 @@ goroutine"的约束，且不需要任何 WASM/wazero 相关的线程隔离机制
 
 ### fetch() 的执行模型
 
-goja 的 `SetGoAsyncFunc`（用于注册 `__go_fetchRaw` 等宿主函数）在 sobek 下是**同步执行**的：调用宿主函数时，
-Go 侧会阻塞当前 goroutine 直到该函数返回（`__go_fetchRaw` 内部就是一次阻塞式 `fetchClient.Do(req)`），然后才把
-结果包装成一个已 resolve 的 Promise 交还给 JS——没有额外的调度或后台 goroutine。
+sobek 本身没有内置事件循环，`SetGoAsyncFunc`（用于注册 `__go_fetchRaw`）自建了一个最小事件循环来
+支持真正的并发：调用宿主函数时不会同步阻塞——`__go_fetchRaw` 立即返回一个 pending 状态的 Promise，
+真正的网络请求（`fetchClient.Do(req)`）放到独立 goroutine 里执行；该 goroutine 完成后把
+"resolve/reject 这个 Promise"作为一个待执行任务投递回持有该 `sobek.Runtime` 的 goroutine（通过
+`gojaContext.pending` channel），由后者在自己的 `Eval` 调用里排空执行（`pumpUntilSettled`），因为
+sobek 明确要求 Promise 的 resolve/reject 只能在 Runtime 的"所有权 goroutine"上调用。
 
 ```typescript
-// Promise.allSettled 仍是失败隔离的正确写法：任一上游失败不影响其它上游的结果
+// Promise.allSettled 是失败隔离的正确写法：任一上游失败不影响其它上游的结果；
+// 三次 fetch 会各自在独立 goroutine 里真正并发发起
 const [product, inventory, reviews] = await Promise.allSettled([
   upstreamGet<Product>(`${base.catalog}/products/${id}`),
   upstreamGet<Inventory>(`${base.inventory}/stock/${id}`),
@@ -386,6 +390,4 @@ const [product, inventory, reviews] = await Promise.allSettled([
 ]);
 ```
 
-但由于 `await fetch(...)` 是同步阻塞调用，同一请求内的多次 fetch **目前是顺序执行**，总耗时接近各请求耗时之和，
-而不是取最慢单个请求的时间。若要恢复真正的并发上游调用，需要在 Go 层引入新的调度机制（例如让宿主函数在独立
-goroutine 中执行并通过某种方式把控制权还给 JS 事件循环），目前尚未实现。
+同一请求内的多次 fetch 总耗时约等于最慢的那一个上游请求，而不是各请求耗时之和。

@@ -9,10 +9,12 @@ import (
 )
 
 // gojaEngine implements JSEngine using the sobek (grafana/sobek, a goja fork) pure-Go JS interpreter.
-// sobek runs host functions synchronously on the same goroutine as the JS code, so
-// SetGoAsyncFunc behaves identically to SetGoFunc — no goroutine or Promise is created.
-// JS callers that do `await __go_fetchRaw(...)` simply receive the resolved value as an
-// inline microtask, which sobek drains before RunScript returns.
+// sobek has no built-in event loop: a Promise left pending when RunScript returns just stays
+// pending until something later calls its resolve/reject on the runtime-owning goroutine (see
+// gojaContext.pumpUntilSettled). SetGoFunc host functions still run synchronously in place.
+// SetGoAsyncFunc host functions (currently only __go_fetchRaw) dispatch the real work to a
+// background goroutine and hand the result back through gojaContext.pending, so JS code doing
+// `await Promise.allSettled([fetch(a), fetch(b), fetch(c)])` runs the fetches concurrently.
 type gojaEngine struct{}
 
 func (e *gojaEngine) New() (JSRuntime, error) {
@@ -37,6 +39,13 @@ func (r *gojaRuntime) Close()         {}
 type gojaContext struct {
 	rt    *sobek.Runtime
 	goCtx context.Context
+
+	// pending carries resolve/reject jobs from SetGoAsyncFunc's background goroutines back to
+	// whichever goroutine currently owns rt. Eval creates a fresh channel per top-level call —
+	// required, not just cautious: rt is reused sequentially across many requests, and a stale
+	// job from an earlier (already-settled or abandoned) call must never be deliverable into a
+	// later, unrelated call's pump loop.
+	pending chan func()
 }
 
 func (c *gojaContext) SetContext(ctx context.Context) { c.goCtx = ctx }
@@ -47,7 +56,9 @@ func (c *gojaContext) Value(key any) any               { return c.goCtx.Value(ke
 
 // Eval runs src in the sobek runtime.
 // EvalModule uses sobek's native ParseModule → Link → Evaluate pipeline.
-// EvalAsync wraps src in an async IIFE so top-level `await` is valid.
+// EvalAsync wraps src in an async IIFE so top-level `await` is valid; since SetGoAsyncFunc's
+// background goroutines may leave the resulting top-level Promise pending when RunScript
+// returns, this drives it to completion via pumpUntilSettled.
 func (c *gojaContext) Eval(filename, src string, mode EvalMode) error {
 	if mode == EvalModule {
 		return c.evalAsModule(filename, src)
@@ -56,8 +67,34 @@ func (c *gojaContext) Eval(filename, src string, mode EvalMode) error {
 	if mode == EvalAsync {
 		code = "(async()=>{\n" + src + "\n})()"
 	}
-	_, err := c.rt.RunScript(filename, code)
-	return err
+	c.pending = make(chan func())
+	val, err := c.rt.RunScript(filename, code)
+	if err != nil {
+		return err
+	}
+	if mode != EvalAsync {
+		return nil
+	}
+	promise, ok := val.Export().(*sobek.Promise)
+	if !ok {
+		return nil
+	}
+	return c.pumpUntilSettled(promise)
+}
+
+// pumpUntilSettled drives p to completion by running resolve/reject jobs delivered on
+// c.pending as SetGoAsyncFunc's background goroutines finish their work. Every such goroutine
+// is guaranteed to eventually send exactly one job (bounded by the host function's own timeout,
+// with a recover() fallback for panics), so this loop always terminates.
+func (c *gojaContext) pumpUntilSettled(p *sobek.Promise) error {
+	for p.State() == sobek.PromiseStatePending {
+		job := <-c.pending
+		job()
+	}
+	if p.State() == sobek.PromiseStateRejected {
+		return fmt.Errorf("%v", p.Result())
+	}
+	return nil
 }
 
 func (c *gojaContext) evalAsModule(filename, src string) error {
@@ -109,14 +146,22 @@ func (c *gojaContext) SetGoFunc(name string, fn GoFunc) {
 func (c *gojaContext) SetGoAsyncFunc(name string, fn GoFunc) {
 	c.rt.Set(name, func(call sobek.FunctionCall) sobek.Value {
 		args := gojaExportArgs(call.Arguments)
-		result, err := fn(c.goCtx, args...)
-		if err != nil {
-			promise, _, reject := c.rt.NewPromise()
-			_ = reject(c.rt.NewGoError(err))
-			return c.rt.ToValue(promise)
-		}
-		promise, resolve, _ := c.rt.NewPromise()
-		_ = resolve(gojaToJSValue(c.rt, result))
+		promise, resolve, reject := c.rt.NewPromise()
+		goCtx := c.goCtx     // capture per call, not per registration
+		pending := c.pending // capture the current Eval call's channel
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					pending <- func() { reject(c.rt.NewGoError(fmt.Errorf("panic: %v", r))) }
+				}
+			}()
+			result, err := fn(goCtx, args...)
+			if err != nil {
+				pending <- func() { reject(c.rt.NewGoError(err)) }
+			} else {
+				pending <- func() { resolve(gojaToJSValue(c.rt, result)) }
+			}
+		}()
 		return c.rt.ToValue(promise)
 	})
 }

@@ -119,7 +119,7 @@ Netlify 适配器的产物已经是 esbuild 打包的结果，但 entry 仍是 `
 | 属性 | goja / sobek |
 |---|---|
 | ES 规范支持 | 现代 ES（`for-await-of`/`async function*` 等需 esbuild 降级到 ES2017，见 docs/bundle.md） |
-| 异步（async/await） | ✅ 支持，但 `SetGoAsyncFunc` 注册的宿主函数在 goja 下是**同步**执行（见下方限制） |
+| 异步（async/await） | ✅ 支持；`SetGoAsyncFunc` 注册的宿主函数派发到独立 goroutine 真正并发执行（见下方） |
 | 无 CGO | ✅ 纯 Go，无 CGO、无 WASM 运行时 |
 | 单文件二进制 | ✅ |
 | 冷启动 | 快（无 WASM 初始化、无字节码编译步骤，直接 eval 源码） |
@@ -127,15 +127,26 @@ Netlify 适配器的产物已经是 esbuild 打包的结果，但 entry 仍是 `
 goja/sobek 满足核心要求：纯 Go、无 CGO、单二进制分发、Pool 模型天然支持并发
 （每个 runtime 独立 JS heap，互不共享内存）。
 
-### 已知限制
+### 并发 fetch：自建事件循环
 
-goja 的宿主函数绑定（`SetGoAsyncFunc`）在同一 goroutine 上**同步**执行——调用宿主函数时
-JS 引擎会阻塞直到该 Go 函数返回，返回值再包装成一个已完成（resolved）的 Promise。
-这与 QuickJS 时代"通过独立 goroutine + `pendingCallbacks` 实现真正并发"的模型不同，
-带来一个实际影响：JS 侧 `Promise.allSettled([fetch(a), fetch(b), fetch(c)])` 这类"并发发起
-多个 fetch"的写法，在 goja 下会退化为**顺序执行**（数组字面量按顺序求值，每个 `fetch()`
-调用内部的宿主函数调用会阻塞到对应请求完成后才返回）。需要真正并发的多路 fetch 场景，
-应在 Go 层（BFF 业务逻辑）用 goroutine 并发发起，而不是依赖 JS 侧的 `Promise.allSettled`。
+sobek 本身不提供事件循环（无内置 `setTimeout`/任务队列调度，需嵌入方自行实现）。
+`internal/runtime/engine_goja.go` 的 `SetGoAsyncFunc`（目前唯一使用者是 `__go_fetchRaw`）
+不会同步阻塞调用宿主函数，而是：
+
+1. 立即通过 `rt.NewPromise()` 返回一个 pending 状态的 Promise；
+2. 把真正的工作（网络请求）放到一个独立 goroutine 里执行；
+3. 该 goroutine 完成后，把"调用 resolve/reject"这个动作作为一个 `func()` 投递到
+   `gojaContext.pending` channel；
+4. 持有 `*sobek.Runtime` 的那个 goroutine（`Eval` 内部的 `pumpUntilSettled` 循环）从
+   `pending` 里取出并执行这个 job——这一步必须在 Runtime 的"所有权 goroutine"上进行，
+   因为 sobek 明确声明 `Runtime` 非并发安全，`resolve`/`reject` 也不能跨 goroutine 并行调用。
+
+`pending` channel 按每次顶层 `Eval` 调用重新创建（而不是常驻复用），避免同一个
+`*sobek.Runtime`（Pool 会在多个请求间顺序复用同一个 runtime 实例）出现"上一个请求的
+后台任务迟到、被下一个请求的循环误收"的串扰问题。
+
+这样 JS 侧 `Promise.allSettled([fetch(a), fetch(b), fetch(c)])` 这类写法，三个 `fetch()`
+会各自在独立 goroutine 里真正并发发起网络请求，总耗时约等于最慢的那一个，而不是三者之和。
 
 ### Pool 模型与 BFF Render
 

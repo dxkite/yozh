@@ -16,7 +16,7 @@
 ## 目录结构
 
 ```
-goja_test.go                  # goja/sobek 引擎单元测试（2 个）
+goja_test.go                  # goja/sobek 引擎单元测试（3 个）
 pack_rebuild_test.go          # pack 重建测试（需 UPDATE_TESTDATA=1）
 rebuild_testdata_test.go      # testdata 重建（需 UPDATE_TESTDATA=1）
 shims_test.go                 # Node.js 内建模块 shim 测试（14 个）
@@ -97,6 +97,16 @@ TestGojaPoolInit
 TestGojaRequest
 ```
 **验证**：goja Pool 处理 GET `/hello` → 200，body 为 `hello world`。
+
+---
+
+#### TC-G03：并发 fetch（Pool/HandleRequest 层面）
+```go
+TestGojaConcurrentFetch
+```
+**验证**：一个 handler 内 `Promise.all` 并发发起 3 个 fetch（各带 80ms 上游延迟），总耗时 < 160ms
+（非顺序执行的 240ms）。比 `integration.TestBFFConcurrentFetch` 更聚焦——直接走 `NewPool` +
+`HandleRequest`，不需要完整 Astro 集成 fixture。
 
 ---
 
@@ -393,12 +403,11 @@ TestBFFGracefulDegradation
 ```go
 TestBFFConcurrentFetch
 ```
-**验证**：3×80ms 请求总耗时 < 240ms（非顺序执行）。
-
-**已知问题**：goja 引擎下 `SetGoAsyncFunc` 同步执行宿主函数（无后台 goroutine 调度），
-`await fetch()` 内部是一次阻塞式 HTTP 调用，同一请求内多次 fetch 目前是顺序执行的
-（实测 3×80ms ≈ 246ms），与本用例断言的"非顺序执行"矛盾。详见 [bff-example.md](./bff-example.md) 中
-"fetch() 的执行模型"一节。
+**验证**：3×80ms 请求总耗时 < 240ms（非顺序执行）。`SetGoAsyncFunc`（`__go_fetchRaw`）把每次调用派发到
+独立 goroutine，通过 `gojaContext.pending` channel 把 resolve/reject 交还给持有 `sobek.Runtime` 的
+goroutine 执行（`pumpUntilSettled`），实现真正并发。详见 [bff-example.md](./bff-example.md) 中
+"fetch() 的执行模型"一节。另见 `goja_test.go` 的 `TestGojaConcurrentFetch`，直接在 Pool/HandleRequest
+层面验证同一断言，不依赖完整 Astro 集成 fixture。
 
 ---
 
