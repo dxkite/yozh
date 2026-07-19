@@ -343,7 +343,9 @@ func HandleRequest(rc *RequestContext) {
 
 	var respHeaders [][2]string
 	if sig.Meta.HeadersJSON != "" {
-		json.Unmarshal([]byte(sig.Meta.HeadersJSON), &respHeaders)
+		if err := json.Unmarshal([]byte(sig.Meta.HeadersJSON), &respHeaders); err != nil {
+			rtlog.WarnContext(goCtx, "response headers JSON invalid — headers dropped", "err", err)
+		}
 	}
 	for _, kv := range respHeaders {
 		w.Header().Add(kv[0], kv[1])

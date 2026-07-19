@@ -71,25 +71,25 @@ export default function(config) {
 `)
 
 func TestMain(m *testing.M) {
-	bundle, err := os.ReadFile(filepath.Join("testdata", "example", "bundle.mjs"))
+	packData, err := os.ReadFile(filepath.Join("testdata", "example", "example.pack"))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "read testdata bundle: %v\n", err)
+		fmt.Fprintf(os.Stderr, "read example.pack: %v\n", err)
 		os.Exit(1)
 	}
 
-	sharedPool, err = astroruntime.NewPool(bundle,
+	sharedPool, err = astroruntime.NewPoolFromPack(packData,
 		astroruntime.WithEnv(map[string]string{"NODE_ENV": "production"}),
 		astroruntime.WithSize(4))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "NewPool sharedPool: %v\n", err)
+		fmt.Fprintf(os.Stderr, "NewPoolFromPack sharedPool: %v\n", err)
 		os.Exit(1)
 	}
 
-	sessionPool, err = astroruntime.NewPool(bundle,
+	sessionPool, err = astroruntime.NewPoolFromPack(packData,
 		astroruntime.WithEnv(map[string]string{"NODE_ENV": "production"}),
 		astroruntime.WithSize(1))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "NewPool sessionPool: %v\n", err)
+		fmt.Fprintf(os.Stderr, "NewPoolFromPack sessionPool: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -99,11 +99,6 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	packData, err := os.ReadFile(filepath.Join("testdata", "example", "example.pack"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "read example.pack: %v\n", err)
-		os.Exit(1)
-	}
 	packRT, err = astroruntime.NewRuntime(
 		astroruntime.WithPack(packData),
 		astroruntime.WithPoolOptions(

@@ -19,7 +19,7 @@ import (
 var distFS fs.FS
 
 func init() {
-	distFS = os.DirFS("../examples/example/dist")
+	distFS = os.DirFS("../examples/astro/dist")
 }
 
 func imageReq(t *testing.T, query string) *httptest.ResponseRecorder {

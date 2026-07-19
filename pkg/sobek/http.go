@@ -1,6 +1,7 @@
-package jsruntime
+package sobek
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,14 +12,18 @@ import (
 
 var fetchClient = &http.Client{Timeout: 30 * time.Second}
 
+const defaultFetchBodyLimit = 10 << 20 // 10 MiB
+
 // goFetch performs a real HTTP request from Go and returns the response as JSON.
-func goFetch(urlStr, method, headersJSON, body string) (string, int, error) {
+// ctx carries the per-request deadline; fetchClient.Timeout acts as a hard upper bound.
+// bodyLimit caps the response body read; 0 means defaultFetchBodyLimit.
+func goFetch(ctx context.Context, urlStr, method, headersJSON, body string, bodyLimit int64) (string, int, error) {
 	var bodyReader io.Reader
 	if body != "" {
 		bodyReader = strings.NewReader(body)
 	}
 
-	req, err := http.NewRequest(method, urlStr, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, urlStr, bodyReader)
 	if err != nil {
 		return "", 0, fmt.Errorf("fetch: create request: %w", err)
 	}
@@ -36,7 +41,11 @@ func goFetch(urlStr, method, headersJSON, body string) (string, int, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	limit := bodyLimit
+	if limit <= 0 {
+		limit = defaultFetchBodyLimit
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return "", 0, fmt.Errorf("fetch: read body: %w", err)
 	}

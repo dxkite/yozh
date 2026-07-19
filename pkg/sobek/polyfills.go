@@ -1,4 +1,4 @@
-package jsruntime
+package sobek
 
 import _ "embed"
 

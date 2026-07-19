@@ -516,8 +516,8 @@ func TestRequestTraceJSCheckpointsDone(t *testing.T) {
 			t.Errorf("checkpoint %q: end %v before start %v", cp.name, cp.end, cp.start)
 		}
 	}
-	if !names["ssr-handler"] {
-		t.Errorf("expected checkpoint \"ssr-handler\", got names: %v", names)
+	if !names["ssr"] {
+		t.Errorf("expected checkpoint \"ssr\", got names: %v", names)
 	}
 }
 

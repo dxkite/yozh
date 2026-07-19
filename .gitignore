@@ -17,3 +17,7 @@ dist/
 
 # Test
 bundle.pack
+
+pnpm-lock.yaml
+
+astro-runtime

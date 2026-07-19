@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/grafana/sobek"
+
+	"github.com/dxkite/astro-runtime/pkg/node"
 )
 
 // shimRun creates a fresh goja (sobek) runtime, applies optional setup code, registers
@@ -14,7 +16,7 @@ import (
 // Returns the assertion map; any false entry fails the test via checkT.
 func shimRun(t *testing.T, shimFile, setup, testCode string) map[string]bool {
 	t.Helper()
-	data, err := shimsFS.ReadFile("js/shims/" + shimFile)
+	data, err := node.ReadShimFile(shimFile)
 	if err != nil {
 		t.Fatalf("read shim %s: %v", shimFile, err)
 	}

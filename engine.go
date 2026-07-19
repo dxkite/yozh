@@ -1,25 +1,25 @@
 package astroruntime
 
-import jsruntime "github.com/dxkite/astro-runtime/internal/runtime"
+import sobek "github.com/dxkite/astro-runtime/pkg/sobek"
 
 // Type aliases — public API unchanged; external callers see astroruntime.JSEngine etc.
-type GoFunc        = jsruntime.GoFunc
-type EvalMode      = jsruntime.EvalMode
-type JSContext     = jsruntime.JSContext
-type JSRuntime     = jsruntime.JSRuntime
-type JSEngine      = jsruntime.JSEngine
-type EngineKind    = jsruntime.EngineKind
+type GoFunc        = sobek.GoFunc
+type EvalMode      = sobek.EvalMode
+type JSContext     = sobek.JSContext
+type JSRuntime     = sobek.JSRuntime
+type JSEngine      = sobek.JSEngine
+type EngineKind    = sobek.EngineKind
 const (
-	EvalScript EvalMode = jsruntime.EvalScript
-	EvalModule EvalMode = jsruntime.EvalModule
-	EvalAsync  EvalMode = jsruntime.EvalAsync
+	EvalScript EvalMode = sobek.EvalScript
+	EvalModule EvalMode = sobek.EvalModule
+	EvalAsync  EvalMode = sobek.EvalAsync
 )
 
 const (
-	EngineGoja EngineKind = jsruntime.EngineGoja
+	EngineGoja EngineKind = sobek.EngineGoja
 )
 
 // ValidateEngineKind checks that the requested engine kind is available in this build.
 func ValidateEngineKind(kind EngineKind) error {
-	return jsruntime.ValidateEngineKind(kind)
+	return sobek.ValidateEngineKind(kind)
 }

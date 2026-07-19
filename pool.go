@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"sync/atomic"
 	"time"
 
-	jsruntime "github.com/dxkite/astro-runtime/internal/runtime"
+	"github.com/dxkite/astro-runtime/pkg/node"
+	sobek "github.com/dxkite/astro-runtime/pkg/sobek"
 	"github.com/dxkite/astro-runtime/trace"
 )
 
@@ -19,9 +21,10 @@ type poolConfig struct {
 	contextProvider func(*http.Request) *NetlifyContext
 	requestTimeout  time.Duration // 0 = no timeout; applied per request via context.WithTimeout
 	engine          JSEngine      // nil → default goja engine
-	bootstrap string // custom bootstrap JS source; "" = use built-in astro bootstrap
-	polyfill  string // custom polyfill JS source; when non-empty, replaces all built-in polyfills
-	selfURL   string // internal base URL for relative fetch resolution (e.g. http://127.0.0.1:8080)
+	bootstrap      string // custom bootstrap JS source; "" = use built-in astro bootstrap
+	polyfill       string // custom polyfill JS source; when non-empty, replaces all built-in polyfills
+	selfURL        string // internal base URL for relative fetch resolution (e.g. http://127.0.0.1:8080)
+	fetchBodyLimit int64  // max fetch() response body bytes; 0 = default 10 MiB
 }
 
 // PoolOption configures a JS runtime pool.
@@ -82,6 +85,12 @@ func WithPolyfill(src string) PoolOption {
 	return func(c *poolConfig) { c.polyfill = src }
 }
 
+// WithFetchBodyLimit sets the maximum bytes read from any fetch() response body.
+// Defaults to 10 MiB when unset or zero.
+func WithFetchBodyLimit(limit int64) PoolOption {
+	return func(c *poolConfig) { c.fetchBodyLimit = limit }
+}
+
 // WithEngine sets a custom JSEngine implementation for the pool.
 func WithEngine(engine JSEngine) PoolOption {
 	return func(c *poolConfig) { c.engine = engine }
@@ -112,15 +121,28 @@ type pooledRuntime struct {
 type Pool struct {
 	pool            chan *pooledRuntime
 	workers         chan func()
+	closed          atomic.Bool
 	bundleCode      []byte
 	gojaBundle      []byte // IIFE bundle for goja; falls back to bundleCode when nil
 	engine          JSEngine
 	env             map[string]string
 	contextProvider func(*http.Request) *NetlifyContext
 	requestTimeout  time.Duration
-	bootstrap string // custom bootstrap source; "" = use built-in astro bootstrap
-	polyfill  string // custom polyfill source; "" = use built-in polyfills
-	selfURL   string // internal base URL for relative fetch resolution
+	bootstrap      string // custom bootstrap source; "" = use built-in astro bootstrap
+	polyfill       string // custom polyfill source; "" = use built-in polyfills
+	selfURL        string // internal base URL for relative fetch resolution
+	fetchBodyLimit int64  // max fetch() response body bytes; 0 = default 10 MiB
+}
+
+// NewPoolFromPack creates a JS runtime pool from the goja bundle inside a .pack file.
+// It opens the pack, extracts the goja-format bundle, and forwards to NewPool.
+func NewPoolFromPack(packData []byte, opts ...PoolOption) (*Pool, error) {
+	pc, err := openPackContentsInMemory(packData)
+	if err != nil {
+		return nil, fmt.Errorf("open pack: %w", err)
+	}
+	opts = append([]PoolOption{WithGojaBundle(pc.gojaCode)}, opts...)
+	return NewPool(nil, opts...)
 }
 
 // NewPool creates a pool of JS runtimes, each initialized with:
@@ -155,12 +177,16 @@ func NewPool(bundleCode []byte, opts ...PoolOption) (*Pool, error) {
 		env = map[string]string{}
 	}
 
+	if cfg.requestTimeout == 0 {
+		cfg.requestTimeout = 30 * time.Second
+	}
+
 	// Resolve the engine: if a kindSentinel was set, build the real engine now.
 	eng := cfg.engine
 	if eng == nil {
-		eng = jsruntime.NewEngineForKind(jsruntime.DefaultEngineKind())
+		eng = sobek.NewEngineForKind(sobek.DefaultEngineKind())
 	} else if sentinel, ok := eng.(*kindSentinel); ok {
-		eng = jsruntime.NewEngineForKind(sentinel.kind)
+		eng = sobek.NewEngineForKind(sentinel.kind)
 	}
 
 	p := &Pool{
@@ -172,9 +198,10 @@ func NewPool(bundleCode []byte, opts ...PoolOption) (*Pool, error) {
 		env:             env,
 		contextProvider: cfg.contextProvider,
 		requestTimeout:  cfg.requestTimeout,
-		bootstrap: cfg.bootstrap,
-		polyfill:  cfg.polyfill,
-		selfURL:   cfg.selfURL,
+		bootstrap:      cfg.bootstrap,
+		polyfill:       cfg.polyfill,
+		selfURL:        cfg.selfURL,
+		fetchBodyLimit: cfg.fetchBodyLimit,
 	}
 
 	for i := 0; i < size; i++ {
@@ -218,7 +245,7 @@ func (p *Pool) newRuntime() (*pooledRuntime, error) {
 	prt := &pooledRuntime{rt: rt}
 	ctx := rt.Ctx()
 
-	streamCallbacks := jsruntime.StreamCallbacks{
+	streamCallbacks := sobek.StreamCallbacks{
 		SendHeaders: func(status int, headersJSON string) {
 			if ch := prt.streamCh; ch != nil {
 				ch <- ResponseSignal{
@@ -240,13 +267,18 @@ func (p *Pool) newRuntime() (*pooledRuntime, error) {
 		},
 	}
 
-	if err := jsruntime.SetupRuntime(ctx, jsruntime.SetupOptions{
-		Bundle:        bundleSrc,
-		Env:           p.env,
-		Stream:        streamCallbacks,
-		Bootstrap: p.bootstrap,
-		Polyfill:  p.polyfill,
-		SelfURL:   p.selfURL,
+	if err := node.SetupNodeGlobals(ctx, p.env); err != nil {
+		rt.Close()
+		return nil, fmt.Errorf("node globals: %w", err)
+	}
+
+	if err := sobek.SetupRuntime(ctx, sobek.SetupOptions{
+		Bundle:         bundleSrc,
+		Stream:         streamCallbacks,
+		Bootstrap:      p.bootstrap,
+		Polyfill:       p.polyfill,
+		SelfURL:        p.selfURL,
+		FetchBodyLimit: p.fetchBodyLimit,
 	}); err != nil {
 		rt.Close()
 		return nil, err
@@ -279,9 +311,20 @@ func (p *Pool) Put(prt *pooledRuntime) {
 	}
 }
 
-// submit sends fn to a worker goroutine. Falls back to a temporary goroutine if all workers are busy.
+// submit sends fn to a worker goroutine. Falls back to a temporary goroutine if all workers are busy or closed.
 // ctx is used to call WorkerFallback on the RequestTrace when the fallback path is taken.
 func (p *Pool) submit(ctx context.Context, fn func()) {
+	if p.closed.Load() {
+		go fn()
+		return
+	}
+	// Recover from "send on closed channel" that can occur if Close() fires between
+	// the closed.Load() check above and the channel send in the select below.
+	defer func() {
+		if recover() != nil {
+			go fn()
+		}
+	}()
 	select {
 	case p.workers <- fn:
 	default:
@@ -306,5 +349,8 @@ func (p *Pool) Stats() PoolStats {
 	return PoolStats{Size: size, Idle: idle, Busy: size - idle}
 }
 
-// Close stops all worker goroutines.
-func (p *Pool) Close() { close(p.workers) }
+// Close stops all worker goroutines. Safe to call once; subsequent submit() calls fall back to go fn().
+func (p *Pool) Close() {
+	p.closed.Store(true)
+	close(p.workers)
+}

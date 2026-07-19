@@ -1,4 +1,4 @@
-package jsruntime
+package sobek
 
 import (
 	"context"
@@ -62,13 +62,36 @@ func cryptoErr(msg string) (any, error) {
 	return "ERROR:" + msg, nil
 }
 
+// strArg safely extracts the string at position i from args.
+// Returns "" if i is out of range or the value is not a string.
+func strArg(args []any, i int) string {
+	if i >= len(args) {
+		return ""
+	}
+	s, _ := args[i].(string)
+	return s
+}
+
+// addCryptoKey inserts ck into keyReg. When the registry reaches 256 entries it
+// is cleared first: crypto keys are per-request ephemeral and unbounded growth
+// indicates a leak (JS side creating keys without using them across many requests).
+func addCryptoKey(keyReg map[string]*cryptoKey, ck *cryptoKey) {
+	if len(keyReg) >= 256 {
+		rtlog.Warn("crypto key registry full — clearing all entries", "size", len(keyReg))
+		for k := range keyReg {
+			delete(keyReg, k)
+		}
+	}
+	keyReg[ck.ID] = ck
+}
+
 func injectCryptoSubtle(ctx JSContext, keyReg map[string]*cryptoKey) {
 	ctx.SetGoFunc("__go_cryptoSubtleDigest", func(_ context.Context, args ...any) (any, error) {
 		if len(args) < 2 {
 			return cryptoErr("missing arguments")
 		}
-		algo := strings.ToUpper(args[0].(string))
-		data, err := base64.StdEncoding.DecodeString(args[1].(string))
+		algo := strings.ToUpper(strArg(args, 0))
+		data, err := base64.StdEncoding.DecodeString(strArg(args, 1))
 		if err != nil {
 			return cryptoErr("invalid base64: " + err.Error())
 		}
@@ -99,12 +122,12 @@ func injectCryptoSubtle(ctx JSContext, keyReg map[string]*cryptoKey) {
 		format, _ := args[0].(string)
 		rawData, _ := args[1].(string)
 		var algo algoSpec
-		if err := json.Unmarshal([]byte(args[2].(string)), &algo); err != nil {
+		if err := json.Unmarshal([]byte(strArg(args, 2)), &algo); err != nil {
 			return cryptoErr("invalid algorithm JSON: " + err.Error())
 		}
-		extractable := args[3].(string) == "true"
+		extractable := strArg(args, 3) == "true"
 		var usages []string
-		if err := json.Unmarshal([]byte(args[4].(string)), &usages); err != nil {
+		if err := json.Unmarshal([]byte(strArg(args, 4)), &usages); err != nil {
 			return cryptoErr("invalid usages JSON: " + err.Error())
 		}
 
@@ -138,14 +161,14 @@ func injectCryptoSubtle(ctx JSContext, keyReg map[string]*cryptoKey) {
 		if err != nil {
 			return cryptoErr(err.Error())
 		}
-		keyReg[id] = &cryptoKey{
+		addCryptoKey(keyReg, &cryptoKey{
 			ID:          id,
 			Type:        "secret",
 			Algo:        algo,
 			Raw:         keyBytes,
 			Extractable: extractable,
 			Usages:      usages,
-		}
+		})
 		return id, nil
 	})
 
@@ -154,12 +177,12 @@ func injectCryptoSubtle(ctx JSContext, keyReg map[string]*cryptoKey) {
 			return cryptoErr("missing arguments")
 		}
 		var algo algoSpec
-		if err := json.Unmarshal([]byte(args[0].(string)), &algo); err != nil {
+		if err := json.Unmarshal([]byte(strArg(args, 0)), &algo); err != nil {
 			return cryptoErr("invalid algorithm JSON: " + err.Error())
 		}
-		extractable := args[1].(string) == "true"
+		extractable := strArg(args, 1) == "true"
 		var usages []string
-		if err := json.Unmarshal([]byte(args[2].(string)), &usages); err != nil {
+		if err := json.Unmarshal([]byte(strArg(args, 2)), &usages); err != nil {
 			return cryptoErr("invalid usages JSON: " + err.Error())
 		}
 
@@ -199,14 +222,14 @@ func injectCryptoSubtle(ctx JSContext, keyReg map[string]*cryptoKey) {
 		if err != nil {
 			return cryptoErr(err.Error())
 		}
-		keyReg[id] = &cryptoKey{
+		addCryptoKey(keyReg, &cryptoKey{
 			ID:          id,
 			Type:        "secret",
 			Algo:        algo,
 			Raw:         keyBytes,
 			Extractable: extractable,
 			Usages:      usages,
-		}
+		})
 		return id, nil
 	})
 
@@ -304,8 +327,8 @@ func injectCryptoSubtle(ctx JSContext, keyReg map[string]*cryptoKey) {
 			return "false", nil
 		}
 		keyID, _ := args[1].(string)
-		sig, err1 := base64.StdEncoding.DecodeString(args[2].(string))
-		data, err2 := base64.StdEncoding.DecodeString(args[3].(string))
+		sig, err1 := base64.StdEncoding.DecodeString(strArg(args, 2))
+		data, err2 := base64.StdEncoding.DecodeString(strArg(args, 3))
 		if err1 != nil || err2 != nil {
 			return "false", nil
 		}
@@ -341,7 +364,7 @@ func injectCryptoSubtle(ctx JSContext, keyReg map[string]*cryptoKey) {
 			return cryptoErr("missing arguments")
 		}
 		var algo algoSpec
-		if err := json.Unmarshal([]byte(args[0].(string)), &algo); err != nil {
+		if err := json.Unmarshal([]byte(strArg(args, 0)), &algo); err != nil {
 			return cryptoErr("invalid algorithm JSON: " + err.Error())
 		}
 		keyID, _ := args[1].(string)
@@ -401,7 +424,7 @@ func injectCryptoSubtle(ctx JSContext, keyReg map[string]*cryptoKey) {
 			return cryptoErr("missing arguments")
 		}
 		var algo algoSpec
-		if err := json.Unmarshal([]byte(args[0].(string)), &algo); err != nil {
+		if err := json.Unmarshal([]byte(strArg(args, 0)), &algo); err != nil {
 			return cryptoErr("invalid algorithm JSON: " + err.Error())
 		}
 		keyID, _ := args[1].(string)

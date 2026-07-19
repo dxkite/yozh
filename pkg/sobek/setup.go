@@ -1,4 +1,4 @@
-package jsruntime
+package sobek
 
 import (
 	"context"
@@ -26,12 +26,12 @@ type StreamCallbacks struct {
 
 // SetupOptions configures a single JS runtime initialization.
 type SetupOptions struct {
-	Bundle        []byte            // ESM bundle source
-	Env           map[string]string
-	Stream        StreamCallbacks
-	Bootstrap string // custom bootstrap source; "" = use built-in astro bootstrap
-	Polyfill  string // custom polyfill source; when non-empty, replaces all built-in polyfills
-	SelfURL   string // internal base URL (e.g. http://127.0.0.1:8080); used by fetch.js for relative URL resolution
+	Bundle         []byte          // ESM bundle source
+	Stream         StreamCallbacks
+	Bootstrap      string // custom bootstrap source; "" = use built-in astro bootstrap
+	Polyfill       string // custom polyfill source; when non-empty, replaces all built-in polyfills
+	SelfURL        string // internal base URL (e.g. http://127.0.0.1:8080); used by fetch.js for relative URL resolution
+	FetchBodyLimit int64  // max response body bytes for fetch(); 0 = default 10 MiB
 }
 
 // resolveBootstrap returns the bootstrap JS source to use for the given options.
@@ -47,7 +47,7 @@ func resolveBootstrap(opts SetupOptions) string {
 func SetupRuntime(ctx JSContext, opts SetupOptions) error {
 	keyReg := make(map[string]*cryptoKey)
 
-	if err := injectHostFunctions(ctx, opts.Env, keyReg); err != nil {
+	if err := injectHostFunctions(ctx, keyReg, opts.FetchBodyLimit); err != nil {
 		return fmt.Errorf("host functions: %w", err)
 	}
 
@@ -150,19 +150,7 @@ func setGoAsyncFunc(ctx JSContext, name string, fn func(context.Context, ...any)
 }
 
 // injectHostFunctions registers Go-backed globals on the JS context.
-func injectHostFunctions(ctx JSContext, env map[string]string, keyReg map[string]*cryptoKey) error {
-	envJSON, _ := json.Marshal(env)
-	setupEnv := fmt.Sprintf(`
-globalThis.__processEnv = %s;
-globalThis.process = { env: __processEnv, version: 'v20.0.0', versions: {}, platform: 'linux', stdout: { fd: 1, write: function(){} }, stderr: { fd: 2, write: function(){} } };
-try {
-  Object.defineProperty(globalThis.process, Symbol.toStringTag, { value: 'process' });
-} catch(e) {}
-`, string(envJSON))
-	if err := ctx.Eval("process-env.js", setupEnv, EvalScript); err != nil {
-		return fmt.Errorf("process.env: %w", err)
-	}
-
+func injectHostFunctions(ctx JSContext, keyReg map[string]*cryptoKey, fetchBodyLimit int64) error {
 	setGoFunc(ctx, "__go_cryptoRandomBytes", func(goCtx context.Context, args ...any) (any, error) {
 		if len(args) == 0 {
 			return nil, fmt.Errorf("__go_cryptoRandomBytes requires 1 argument")
@@ -228,7 +216,7 @@ try {
 			logPath = u.Path
 		}
 		fetchStart := time.Now()
-		result, status, err := goFetch(urlStr, method, headersJSON, reqBody)
+		result, status, err := goFetch(goCtx, urlStr, method, headersJSON, reqBody, fetchBodyLimit)
 		fetchEnd := time.Now()
 		latency := fetchEnd.Sub(fetchStart)
 		if err != nil {

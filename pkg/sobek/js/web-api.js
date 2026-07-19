@@ -1,4 +1,18 @@
 (function() {
+  // ── TypedArray.from — string iterable support ─────────────────────────────
+  // sobek does not support iterating strings in TypedArray.from; patch it.
+  // Common pattern: Uint8Array.from(atob(s), c => c.charCodeAt(0))
+  var _u8from = Uint8Array.from.bind(Uint8Array);
+  Uint8Array.from = function(src, mapFn, thisArg) {
+    if (typeof src === 'string') {
+      var a = new Uint8Array(src.length);
+      for (var i = 0; i < src.length; i++)
+        a[i] = mapFn ? mapFn.call(thisArg, src[i], i) : src.charCodeAt(i);
+      return a;
+    }
+    return mapFn ? _u8from(src, mapFn, thisArg) : _u8from(src);
+  };
+
   // ── TextEncoder / TextDecoder ──────────────────────────────────────────────
   if (!globalThis.TextEncoder) {
     globalThis.TextEncoder = class TextEncoder {
