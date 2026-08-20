@@ -19,7 +19,7 @@ src/
     └── upstream.ts               # 上游服务调用工具
 ```
 
-运行时：单个 Go 二进制（astro-runtime），上游服务为独立 HTTP 服务。
+运行时：单个 Go 二进制（yozh），上游服务为独立 HTTP 服务。
 
 ---
 
@@ -34,7 +34,7 @@ REVIEW_URL=http://review:3003
 HMAC_SECRET=your-signing-secret
 ```
 
-Astro API Routes 通过 `import.meta.env` 或 `process.env` 读取（两者在 astro-runtime 中均可用）。
+Astro API Routes 通过 `import.meta.env` 或 `process.env` 读取（两者在 yozh 中均可用）。
 
 ---
 
@@ -81,7 +81,7 @@ export async function upstreamGet<T>(url: string): Promise<T> {
 }
 ```
 
-> **astro-runtime 说明**：`crypto.subtle` 由 Go 实现（`crypto_subtle.go`），`fetch()` 通过
+> **yozh 说明**：`crypto.subtle` 由 Go 实现（`crypto_subtle.go`），`fetch()` 通过
 > `__go_fetchRaw` 调用 Go 的 `http.Client`（30 秒超时）。两者均对 TypeScript 透明。
 
 ---
@@ -356,7 +356,7 @@ Go HTTP Response → 浏览器
 
 ### 原理
 
-astro-runtime 现在唯一的 JS 引擎是 goja（`github.com/grafana/sobek`），纯 Go 实现，没有 WASM 边界。
+yozh 现在唯一的 JS 引擎是 goja（`github.com/grafana/sobek`），纯 Go 实现，没有 WASM 边界。
 但和大多数 JS 引擎一样，一个 `sobek.Runtime` **不是并发安全的** — 不能有两个 goroutine 同时对同一个
 `Runtime` 调用 `RunScript` / 触发 JS 执行，否则会破坏其内部状态。
 

@@ -38,7 +38,7 @@ PACK="$SCRIPT_DIR/../integration/testdata/example/example.pack"
 
 # ── build & start ─────────────────────────────────────────────────────────────
 echo "=== Building images ==="
-SERVICES="astro-runtime-goja"
+SERVICES="yozh-goja"
 [ "$SKIP_NODE" -eq 0 ] && SERVICES="$SERVICES node-ssr"
 docker compose -f "$COMPOSE_FILE" -p "$PROJECT" build $SERVICES
 
@@ -48,7 +48,7 @@ docker compose -f "$COMPOSE_FILE" -p "$PROJECT" up -d $SERVICES
 
 echo ""
 echo "Waiting for services to become healthy..."
-for svc in astro-runtime-goja $([ "$SKIP_NODE" -eq 0 ] && echo node-ssr); do
+for svc in yozh-goja $([ "$SKIP_NODE" -eq 0 ] && echo node-ssr); do
   container=$(docker compose -f "$COMPOSE_FILE" -p "$PROJECT" ps -q "$svc" 2>/dev/null || true)
   [ -z "$container" ] && continue
   for i in $(seq 1 60); do
@@ -94,7 +94,7 @@ run_bench() {
 echo ""
 echo "Benchmarking path: ${BENCH_PATH}"
 
-run_bench "astro-runtime (goja / pure-Go)" "http://localhost:${GOJA_PORT}${BENCH_PATH}"
+run_bench "yozh (goja / pure-Go)" "http://localhost:${GOJA_PORT}${BENCH_PATH}"
 
 if [ "$SKIP_NODE" -eq 0 ]; then
   run_bench "Node.js (V8)" "http://localhost:${NODE_PORT}${BENCH_PATH}"

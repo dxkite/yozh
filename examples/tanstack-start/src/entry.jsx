@@ -49,7 +49,7 @@ function HomePage() {
     <div>
       <h1>TanStack Router SSR Demo</h1>
       <p>
-        Powered by <strong>astro-runtime</strong> · goja engine ·{' '}
+        Powered by <strong>yozh</strong> · goja engine ·{' '}
         <span className="badge">react bootstrap</span>
       </p>
       <h2>商品列表</h2>
@@ -72,7 +72,7 @@ function AboutPage() {
       <h1>About</h1>
       <p>
         This demo uses <strong>TanStack Router</strong> for SSR routing inside{' '}
-        <strong>astro-runtime</strong> (goja engine).
+        <strong>yozh</strong> (goja engine).
       </p>
       <p>No Vinxi, no Node.js — pure Go + goja.</p>
     </div>

@@ -14,16 +14,16 @@ import (
 	"testing"
 	"time"
 
-	astroruntime "github.com/dxkite/astro-runtime"
+	"github.com/dxkite/yozh"
 )
 
 // Package-level pools and runtimes initialized once in TestMain.
 var (
-	sharedPool  *astroruntime.Pool    // testapp-ssr bundle, size=4, for general SSR tests
-	sessionPool *astroruntime.Pool    // testapp-ssr bundle, size=1, for TestCartSession (requires single runtime)
-	minPool     *astroruntime.Pool    // eval-based minimal bundle, size=4, for polyfill/crypto/BFF tests
-	packRT      *astroruntime.Runtime // pack-based Runtime, for pack smoke tests
-	gojaPool    *astroruntime.Pool    // synthetic IIFE bench bundle, size=4, for HTTP benchmarks
+	sharedPool  *yozh.Pool    // testapp-ssr bundle, size=4, for general SSR tests
+	sessionPool *yozh.Pool    // testapp-ssr bundle, size=1, for TestCartSession (requires single runtime)
+	minPool     *yozh.Pool    // eval-based minimal bundle, size=4, for polyfill/crypto/BFF tests
+	packRT      *yozh.Runtime // pack-based Runtime, for pack smoke tests
+	gojaPool    *yozh.Pool    // synthetic IIFE bench bundle, size=4, for HTTP benchmarks
 )
 
 // mustGojaBundle wraps a hand-written test fixture (bare `export default`/`export function`
@@ -31,7 +31,7 @@ var (
 // sets globalThis.__ssrEntry as a side effect — required by bootstrap-astro.js, which reads
 // __ssrEntry rather than statically importing the bundle module.
 func mustGojaBundle(esm string) []byte {
-	out, err := astroruntime.ConvertBundleForGoja([]byte(esm))
+	out, err := yozh.ConvertBundleForGoja([]byte(esm))
 	if err != nil {
 		panic("ConvertBundleForGoja: " + err.Error())
 	}
@@ -77,33 +77,33 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	sharedPool, err = astroruntime.NewPoolFromPack(packData,
-		astroruntime.WithEnv(map[string]string{"NODE_ENV": "production"}),
-		astroruntime.WithSize(4))
+	sharedPool, err = yozh.NewPoolFromPack(packData,
+		yozh.WithEnv(map[string]string{"NODE_ENV": "production"}),
+		yozh.WithSize(4))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "NewPoolFromPack sharedPool: %v\n", err)
 		os.Exit(1)
 	}
 
-	sessionPool, err = astroruntime.NewPoolFromPack(packData,
-		astroruntime.WithEnv(map[string]string{"NODE_ENV": "production"}),
-		astroruntime.WithSize(1))
+	sessionPool, err = yozh.NewPoolFromPack(packData,
+		yozh.WithEnv(map[string]string{"NODE_ENV": "production"}),
+		yozh.WithSize(1))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "NewPoolFromPack sessionPool: %v\n", err)
 		os.Exit(1)
 	}
 
-	minPool, err = astroruntime.NewPool(minBundle, astroruntime.WithSize(4))
+	minPool, err = yozh.NewPool(minBundle, yozh.WithSize(4))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "NewPool minPool: %v\n", err)
 		os.Exit(1)
 	}
 
-	packRT, err = astroruntime.NewRuntime(
-		astroruntime.WithPack(packData),
-		astroruntime.WithPoolOptions(
-			astroruntime.WithEnv(map[string]string{"NODE_ENV": "production"}),
-			astroruntime.WithSize(2),
+	packRT, err = yozh.NewRuntime(
+		yozh.WithPack(packData),
+		yozh.WithPoolOptions(
+			yozh.WithEnv(map[string]string{"NODE_ENV": "production"}),
+			yozh.WithSize(2),
 		),
 	)
 	if err != nil {
@@ -114,10 +114,10 @@ func TestMain(m *testing.M) {
 	// gojaPool uses the IIFE-format bench bundle with the goja engine.
 	// This is intentionally a simple synthetic bundle (not the real Astro app) so that
 	// the benchmark can run without building the example project.
-	gojaPool, err = astroruntime.NewPool(
+	gojaPool, err = yozh.NewPool(
 		gojaBenchBundle,
-		astroruntime.WithEngineKind(astroruntime.EngineGoja),
-		astroruntime.WithSize(4),
+		yozh.WithEngineKind(yozh.EngineGoja),
+		yozh.WithSize(4),
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "NewPool gojaPool: %v\n", err)
@@ -128,7 +128,7 @@ func TestMain(m *testing.M) {
 }
 
 // do performs a single SSR request and returns the response recorder.
-func do(t *testing.T, pool *astroruntime.Pool, method, path, cookie, body string) *httptest.ResponseRecorder {
+func do(t *testing.T, pool *yozh.Pool, method, path, cookie, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var bodyReader *strings.Reader
 	if body != "" {
@@ -155,7 +155,7 @@ func do(t *testing.T, pool *astroruntime.Pool, method, path, cookie, body string
 	if err != nil {
 		t.Fatalf("RequestContext: %v", err)
 	}
-	astroruntime.HandleRequest(rc)
+	yozh.HandleRequest(rc)
 	return w
 }
 
@@ -263,7 +263,7 @@ func TestCartSession(t *testing.T) {
 
 // ── Polyfill unit tests ───────────────────────────────────────────────────────
 
-func evalExpr(t *testing.T, pool *astroruntime.Pool, expr string) map[string]interface{} {
+func evalExpr(t *testing.T, pool *yozh.Pool, expr string) map[string]interface{} {
 	t.Helper()
 	path := "/test?expr=" + encodeURIComponent(expr)
 	w := do(t, pool, "GET", path, "", "")
@@ -508,7 +508,7 @@ func TestGetRandomValues(t *testing.T) {
 
 func TestPolyfillsInit(t *testing.T) {
 	bundle := mustGojaBundle(`export default function() { return async function(req) { return new Response('ok'); }; }`)
-	_, err := astroruntime.NewPool(bundle, astroruntime.WithSize(2))
+	_, err := yozh.NewPool(bundle, yozh.WithSize(2))
 	if err != nil {
 		t.Fatalf("pool init failed (polyfill error): %v", err)
 	}
@@ -530,7 +530,7 @@ func TestPoolSizeValidation(t *testing.T) {
 		{1000, true},
 	}
 	for _, c := range cases {
-		_, err := astroruntime.NewPool(bundle, astroruntime.WithSize(c.size))
+		_, err := yozh.NewPool(bundle, yozh.WithSize(c.size))
 		if c.ok && err != nil {
 			t.Errorf("size=%d: unexpected error: %v", c.size, err)
 		}
@@ -553,7 +553,7 @@ export default function() {
   };
 }
 `)
-	p, err := astroruntime.NewPool(bundle, astroruntime.WithSize(1))
+	p, err := yozh.NewPool(bundle, yozh.WithSize(1))
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -1043,7 +1043,7 @@ export default function() {
 `)
 
 // doH performs a single SSR request with caller-supplied headers.
-func doH(t *testing.T, pool *astroruntime.Pool, method, path string, headers map[string]string) *httptest.ResponseRecorder {
+func doH(t *testing.T, pool *yozh.Pool, method, path string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	req, err := http.NewRequest(method, "http://localhost"+path, nil)
 	if err != nil {
@@ -1057,7 +1057,7 @@ func doH(t *testing.T, pool *astroruntime.Pool, method, path string, headers map
 	if err != nil {
 		t.Fatalf("RequestContext: %v", err)
 	}
-	astroruntime.HandleRequest(rc)
+	yozh.HandleRequest(rc)
 	return w
 }
 
@@ -1077,7 +1077,7 @@ func parseCtx(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 // TestContextDefaultExtraction verifies that IP is taken from the first value in
 // X-Forwarded-For and RequestID from X-Request-Id when no WithContextProvider is set.
 func TestContextDefaultExtraction(t *testing.T) {
-	p, err := astroruntime.NewPool(contextBundle, astroruntime.WithSize(1))
+	p, err := yozh.NewPool(contextBundle, yozh.WithSize(1))
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -1095,7 +1095,7 @@ func TestContextDefaultExtraction(t *testing.T) {
 
 // TestContextXRealIPFallback verifies that X-Real-Ip is used when X-Forwarded-For is absent.
 func TestContextXRealIPFallback(t *testing.T) {
-	p, err := astroruntime.NewPool(contextBundle, astroruntime.WithSize(1))
+	p, err := yozh.NewPool(contextBundle, yozh.WithSize(1))
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -1110,21 +1110,21 @@ func TestContextXRealIPFallback(t *testing.T) {
 // TestContextWithProvider verifies that WithContextProvider fully replaces default header
 // extraction and all injected fields (including nested Geo/Site/Server) reach the JS handler.
 func TestContextWithProvider(t *testing.T) {
-	p, err := astroruntime.NewPool(contextBundle,
-		astroruntime.WithSize(1),
-		astroruntime.WithContextProvider(func(r *http.Request) *astroruntime.NetlifyContext {
-			return &astroruntime.NetlifyContext{
+	p, err := yozh.NewPool(contextBundle,
+		yozh.WithSize(1),
+		yozh.WithContextProvider(func(r *http.Request) *yozh.NetlifyContext {
+			return &yozh.NetlifyContext{
 				IP:        "9.8.7.6",
 				RequestID: "provider-request-id",
-				Geo: &astroruntime.NetlifyGeo{
+				Geo: &yozh.NetlifyGeo{
 					City:     "Tokyo",
-					Country:  &astroruntime.NetlifyGeoRegion{Code: "JP", Name: "Japan"},
+					Country:  &yozh.NetlifyGeoRegion{Code: "JP", Name: "Japan"},
 					Timezone: "Asia/Tokyo",
 				},
-				Site:    &astroruntime.NetlifySite{ID: "site-xyz", Name: "test-site", URL: "https://test.example.com"},
-				Deploy:  &astroruntime.NetlifyDeploy{ID: "deploy-42"},
-				Account: &astroruntime.NetlifyAccount{ID: "account-99"},
-				Server:  &astroruntime.NetlifyServer{Region: "ap-northeast-1"},
+				Site:    &yozh.NetlifySite{ID: "site-xyz", Name: "test-site", URL: "https://test.example.com"},
+				Deploy:  &yozh.NetlifyDeploy{ID: "deploy-42"},
+				Account: &yozh.NetlifyAccount{ID: "account-99"},
+				Server:  &yozh.NetlifyServer{Region: "ap-northeast-1"},
 			}
 		}),
 	)
@@ -1182,10 +1182,10 @@ func TestContextWithProvider(t *testing.T) {
 // TestContextProviderOverridesHeaders verifies that a registered WithContextProvider takes
 // precedence over X-Forwarded-For / X-Request-Id headers.
 func TestContextProviderOverridesHeaders(t *testing.T) {
-	p, err := astroruntime.NewPool(contextBundle,
-		astroruntime.WithSize(1),
-		astroruntime.WithContextProvider(func(r *http.Request) *astroruntime.NetlifyContext {
-			return &astroruntime.NetlifyContext{IP: "fixed-ip", RequestID: "fixed-id"}
+	p, err := yozh.NewPool(contextBundle,
+		yozh.WithSize(1),
+		yozh.WithContextProvider(func(r *http.Request) *yozh.NetlifyContext {
+			return &yozh.NetlifyContext{IP: "fixed-ip", RequestID: "fixed-id"}
 		}),
 	)
 	if err != nil {
@@ -1206,7 +1206,7 @@ func TestContextProviderOverridesHeaders(t *testing.T) {
 // TestContextDefaultFallbacks verifies that fields not provided by the Go context (Geo, Site, etc.)
 // fall back to the mock defaults defined in bootstrap.mjs buildNetlifyContext.
 func TestContextDefaultFallbacks(t *testing.T) {
-	p, err := astroruntime.NewPool(contextBundle, astroruntime.WithSize(1))
+	p, err := yozh.NewPool(contextBundle, yozh.WithSize(1))
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -1214,7 +1214,7 @@ func TestContextDefaultFallbacks(t *testing.T) {
 	req.RemoteAddr = "127.0.0.1:54321"
 	w := httptest.NewRecorder()
 	rc, _ := p.RequestContext(w, req)
-	astroruntime.HandleRequest(rc)
+	yozh.HandleRequest(rc)
 	ctx := parseCtx(t, w)
 
 	geo, _ := ctx["geo"].(map[string]any)
@@ -1243,7 +1243,7 @@ func TestContextDefaultFallbacks(t *testing.T) {
 // ── Netlify adapter export format tests ──────────────────────────────────────
 
 // TestNetlifyAdapterFormats verifies that bootstrap.mjs resolves the SSR handler
-// correctly for all three Netlify adapter export patterns supported by astro-runtime:
+// correctly for all three Netlify adapter export patterns supported by yozh:
 //
 //   - Astro ≤v4 factory:   export default function(opts) { return async handler }
 //   - Astro ≤v5 handler:   export default async function handler(req, ctx) { ... }
@@ -1283,7 +1283,7 @@ func TestNetlifyAdapterFormats(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			p, err := astroruntime.NewPool(c.bundle, astroruntime.WithSize(1))
+			p, err := yozh.NewPool(c.bundle, yozh.WithSize(1))
 			if err != nil {
 				t.Fatalf("NewPool: %v", err)
 			}
@@ -1312,7 +1312,7 @@ export default function() {
   };
 }
 `)
-	p, err := astroruntime.NewPool(bundle, astroruntime.WithSize(1))
+	p, err := yozh.NewPool(bundle, yozh.WithSize(1))
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}

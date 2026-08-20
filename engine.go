@@ -1,8 +1,8 @@
-package astroruntime
+package yozh
 
-import sobek "github.com/dxkite/astro-runtime/pkg/sobek"
+import sobek "github.com/dxkite/yozh/pkg/sobek"
 
-// Type aliases — public API unchanged; external callers see astroruntime.JSEngine etc.
+// Type aliases — public API unchanged; external callers see yozh.JSEngine etc.
 type GoFunc        = sobek.GoFunc
 type EvalMode      = sobek.EvalMode
 type JSContext     = sobek.JSContext

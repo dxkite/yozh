@@ -1,6 +1,6 @@
-package astroruntime
+package yozh
 
-import "github.com/dxkite/astro-runtime/pkg/node"
+import "github.com/dxkite/yozh/pkg/node"
 
 func BundleSSR(entryPath string) ([]byte, error)      { return node.BundleSSR(entryPath) }
 func BundleSSRGoja(entryPath string) ([]byte, error)  { return node.BundleSSRGoja(entryPath) }

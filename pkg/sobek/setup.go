@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/dxkite/astro-runtime/trace"
+	"github.com/dxkite/yozh/trace"
 )
 
 //go:embed bootstrap-astro.js

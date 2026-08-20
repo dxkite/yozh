@@ -1,10 +1,10 @@
-package astroruntime
+package yozh
 
 import (
 	"context"
 	"log/slog"
 
-	sobek "github.com/dxkite/astro-runtime/pkg/sobek"
+	sobek "github.com/dxkite/yozh/pkg/sobek"
 )
 
 // rtlog is the package-level logger for use within the root package.

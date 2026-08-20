@@ -1,9 +1,9 @@
-package astroruntime
+package yozh
 
 import (
 	"time"
 
-	"github.com/dxkite/astro-runtime/trace"
+	"github.com/dxkite/yozh/trace"
 )
 
 // signalKind tags each ResponseSignal to distinguish header, chunk, done, and error events.

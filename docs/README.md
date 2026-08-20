@@ -1,4 +1,4 @@
-# astro-runtime 文档索引
+# yozh 文档索引
 
 用于网站模板 SSR + BFF Render 的 Go + goja 运行时。
 在不依赖任何云平台 CLI 的情况下，本地或服务端直接运行 `@astrojs/netlify` 适配器编译的 Astro SSR 函数。
@@ -12,28 +12,28 @@
 | [components.md](./components.md) | 各 Go/JS 文件的职责、接口、实现细节 |
 | [polyfills.md](./polyfills.md) | 每个 polyfill 的存在原因、边界、已知局限 |
 | [testing.md](./testing.md) | 测试环境、测试用例（51 个）、调试问题记录 |
-| [benchmark.md](./benchmark.md) | astro-runtime vs Node.js SSR：吞吐量、延迟、镜像大小、资源消耗对比 |
+| [benchmark.md](./benchmark.md) | yozh vs Node.js SSR：吞吐量、延迟、镜像大小、资源消耗对比 |
 
 ## 快速开始
 
 ```bash
 # 构建 CLI
-git clone https://github.com/dxkite/astro-runtime
-cd astro-runtime
-go build -o astro-runtime ./cmd
+git clone https://github.com/dxkite/yozh
+cd yozh
+go build -o yozh ./cmd
 
 # 在已有 Astro + Netlify 项目中运行（先 astro build）
 
 # 方式一：pack（推荐，含静态文件，部署最简单）
-./astro-runtime build --pack --entry .netlify/build/entry.mjs --dist dist --out bundle.pack
-./astro-runtime serve --pack bundle.pack --port 8888
+./yozh build --pack --entry .netlify/build/entry.mjs --dist dist --out bundle.pack
+./yozh serve --pack bundle.pack --port 8888
 
 # 方式二：bundle（预打包 .mjs + 独立 dist 目录）
-./astro-runtime build --entry .netlify/build/entry.mjs --out bundle.mjs
-./astro-runtime serve --bundle bundle.mjs --dist dist --port 8888
+./yozh build --entry .netlify/build/entry.mjs --out bundle.mjs
+./yozh serve --bundle bundle.mjs --dist dist --port 8888
 
 # 方式三：entry（实时打包，适合开发）
-./astro-runtime serve --entry .netlify/build/entry.mjs --dist dist --port 8888
+./yozh serve --entry .netlify/build/entry.mjs --dist dist --port 8888
 ```
 
 ## CLI 命令
@@ -41,7 +41,7 @@ go build -o astro-runtime ./cmd
 ### `build` — 打包 Astro SSR 产物
 
 ```bash
-astro-runtime build [--pack] [--entry path] [--kind astro|react] [--dist dir] [--out path]
+yozh build [--pack] [--entry path] [--kind astro|react] [--dist dir] [--out path]
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -57,7 +57,7 @@ astro-runtime build [--pack] [--entry path] [--kind astro|react] [--dist dir] [-
 ### `serve` — 启动 SSR 服务
 
 ```bash
-astro-runtime serve [--pack path | --bundle path | --entry path] [--dist dir] [--port N]
+yozh serve [--pack path | --bundle path | --entry path] [--dist dir] [--port N]
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -67,7 +67,7 @@ astro-runtime serve [--pack path | --bundle path | --entry path] [--dist dir] [-
 | `--entry` | — | SSR entry（启动时实时打包） |
 | `--dist` | `dist` | 静态输出目录（--bundle/--entry 时使用） |
 | `--port` | `8888` | 监听端口 |
-| `--cache-dir` | `$XDG_CACHE_HOME/astro-runtime` | pack 解压缓存目录（空字符串禁用） |
+| `--cache-dir` | `$XDG_CACHE_HOME/yozh` | pack 解压缓存目录（空字符串禁用） |
 | `--pack-cache-size` | `0`（默认 3） | 最多保留的解压缓存目录数（负数为不限） |
 | `--bootstrap` | — | 自定义 bootstrap .js 文件路径 |
 | `--polyfill` | — | 替换全部内置 polyfill 的 JS 文件路径 |
@@ -84,11 +84,11 @@ pnpm install
 pnpm build
 
 # 方式一：serve from pack
-../../astro-runtime build --pack --entry .netlify/build/entry.mjs --dist dist --out example.pack
-../../astro-runtime serve --pack example.pack --port 8888
+../../yozh build --pack --entry .netlify/build/entry.mjs --dist dist --out example.pack
+../../yozh serve --pack example.pack --port 8888
 
 # 方式二：直接 serve
-../../astro-runtime serve --entry .netlify/build/entry.mjs --dist dist --port 8888
+../../yozh serve --entry .netlify/build/entry.mjs --dist dist --port 8888
 ```
 
 测试路由：
@@ -110,24 +110,24 @@ pnpm build
 ### 构建 pack
 
 ```go
-import astroruntime "github.com/dxkite/astro-runtime"
+import yozh "github.com/dxkite/yozh"
 
 // 1. 从 entry.mjs 打包（esbuild）
-jsCode, err := astroruntime.BundleSSR("/path/to/entry.mjs")
+jsCode, err := yozh.BundleSSR("/path/to/entry.mjs")
 
 // 2. 打包为 .pack（内部转换为 goja 格式，输出 bundle.mjs + dist/）
-err = astroruntime.BuildPack("out.pack", jsCode, "/path/to/dist")
+err = yozh.BuildPack("out.pack", jsCode, "/path/to/dist")
 ```
 
 ### 从 pack 启动服务
 
 ```go
-rt, err := astroruntime.NewRuntime(
-    astroruntime.WithPackFile("out.pack"),
-    astroruntime.WithCacheDir("/tmp/astro-cache"),         // 可选，持久解压缓存
-    astroruntime.WithPoolOptions(
-        astroruntime.WithEnv(map[string]string{"NODE_ENV": "production"}),
-        astroruntime.WithSize(4),
+rt, err := yozh.NewRuntime(
+    yozh.WithPackFile("out.pack"),
+    yozh.WithCacheDir("/tmp/astro-cache"),         // 可选，持久解压缓存
+    yozh.WithPoolOptions(
+        yozh.WithEnv(map[string]string{"NODE_ENV": "production"}),
+        yozh.WithSize(4),
     ),
 )
 if err != nil {
@@ -142,11 +142,11 @@ log.Fatal(rt.ListenAndServe(":8888"))
 
 ```go
 jsCode, _ := os.ReadFile("bundle.mjs")
-rt, err := astroruntime.NewRuntime(
-    astroruntime.WithBundle(jsCode),
-    astroruntime.WithDistDir("/path/to/dist"),
-    astroruntime.WithCacheDir("/tmp/cache"),
-    astroruntime.WithPoolOptions(astroruntime.WithEnv(envMap())),
+rt, err := yozh.NewRuntime(
+    yozh.WithBundle(jsCode),
+    yozh.WithDistDir("/path/to/dist"),
+    yozh.WithCacheDir("/tmp/cache"),
+    yozh.WithPoolOptions(yozh.WithEnv(envMap())),
 )
 defer rt.Close()
 rt.ListenAndServe(":8888")
@@ -155,9 +155,9 @@ rt.ListenAndServe(":8888")
 ### 内嵌于现有 HTTP 服务
 
 ```go
-rt, _ := astroruntime.NewRuntime(
-    astroruntime.WithPack(packBytes),    // 从内存加载
-    astroruntime.WithPoolOptions(astroruntime.WithSize(2)),
+rt, _ := yozh.NewRuntime(
+    yozh.WithPack(packBytes),    // 从内存加载
+    yozh.WithPoolOptions(yozh.WithSize(2)),
 )
 defer rt.Close()
 

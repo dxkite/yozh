@@ -11,13 +11,13 @@ import (
 	"syscall"
 	"time"
 
-	astroruntime "github.com/dxkite/astro-runtime"
+	"github.com/dxkite/yozh"
 	"github.com/spf13/cobra"
 )
 
 func main() {
 	root := &cobra.Command{
-		Use:          "astro-runtime",
+		Use:          "yozh",
 		Short:        "Astro SSR runtime server",
 		SilenceUsage: true,
 	}
@@ -58,7 +58,7 @@ With --pack:    .pack zip (bundle.mjs + dist/).`,
 			if kind == "react" {
 				// React 18: JSX + browser conditions → goja-wrapped ESM in one step.
 				log.Printf("[build] bundling react ...")
-				gojaCode, err := astroruntime.BundleSSRReact(absEntry)
+				gojaCode, err := yozh.BundleSSRReact(absEntry)
 				if err != nil {
 					return fmt.Errorf("esbuild react: %w", err)
 				}
@@ -66,7 +66,7 @@ With --pack:    .pack zip (bundle.mjs + dist/).`,
 				if pack {
 					outPath := resolveOut(out, ".netlify/build/bundle.pack")
 					absDist, _ := filepath.Abs(distDir)
-					if err := astroruntime.BuildPackFromGoja(outPath, gojaCode, absDist); err != nil {
+					if err := yozh.BuildPackFromGoja(outPath, gojaCode, absDist); err != nil {
 						return fmt.Errorf("pack: %w", err)
 					}
 					fi, _ := os.Stat(outPath)
@@ -82,7 +82,7 @@ With --pack:    .pack zip (bundle.mjs + dist/).`,
 			}
 
 			// Default: Astro/Netlify SSR path.
-			jsCode, err := astroruntime.BundleSSR(absEntry)
+			jsCode, err := yozh.BundleSSR(absEntry)
 			if err != nil {
 				return fmt.Errorf("esbuild: %w", err)
 			}
@@ -92,7 +92,7 @@ With --pack:    .pack zip (bundle.mjs + dist/).`,
 				outPath := resolveOut(out, ".netlify/build/bundle.pack")
 				absDist, _ := filepath.Abs(distDir)
 				log.Printf("[build] packing ...")
-				if err := astroruntime.BuildPack(outPath, jsCode, absDist); err != nil {
+				if err := yozh.BuildPack(outPath, jsCode, absDist); err != nil {
 					return fmt.Errorf("pack: %w", err)
 				}
 				fi, _ := os.Stat(outPath)
@@ -100,7 +100,7 @@ With --pack:    .pack zip (bundle.mjs + dist/).`,
 			} else {
 				outPath := resolveOut(out, ".netlify/build/bundle.mjs")
 				log.Printf("[build] converting for goja ...")
-				gojaCode, err := astroruntime.ConvertBundleForGoja(jsCode)
+				gojaCode, err := yozh.ConvertBundleForGoja(jsCode)
 				if err != nil {
 					return fmt.Errorf("goja convert: %w", err)
 				}
@@ -129,7 +129,7 @@ func defaultCacheDir() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(d, "astro-runtime")
+	return filepath.Join(d, "yozh")
 }
 
 func serveCmd() *cobra.Command {
@@ -142,7 +142,7 @@ func serveCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
 			slog.SetDefault(slog.New(jsonHandler))
-			astroruntime.SetLogger(astroruntime.NewLogger(jsonHandler))
+			yozh.SetLogger(yozh.NewLogger(jsonHandler))
 
 			// Auto-detect when nothing is specified.
 			if packPath == "" && entry == "" && bundle == "" {
@@ -219,21 +219,21 @@ func serveCmd() *cobra.Command {
 					return fmt.Errorf("entry not found: %s\n(run `astro build` first)", absEntry)
 				}
 				slog.InfoContext(ctx, "bundling entry", "path", absEntry)
-				jsCode, err = astroruntime.BundleSSRGoja(absEntry)
+				jsCode, err = yozh.BundleSSRGoja(absEntry)
 				if err != nil {
 					return fmt.Errorf("bundle: %w", err)
 				}
 			}
 
-			rt, err := astroruntime.NewRuntime(
-				astroruntime.WithBundle(jsCode),
-				astroruntime.WithDistDir(absDist),
-				astroruntime.WithCacheDir(cacheDir),
-				astroruntime.WithPoolOptions(
-					astroruntime.WithEnv(envMap()),
-					astroruntime.WithBootstrap(bsSrc),
-					astroruntime.WithPolyfill(polyfillSrc),
-					astroruntime.WithSelfURL(fmt.Sprintf("http://127.0.0.1:%d", port)),
+			rt, err := yozh.NewRuntime(
+				yozh.WithBundle(jsCode),
+				yozh.WithDistDir(absDist),
+				yozh.WithCacheDir(cacheDir),
+				yozh.WithPoolOptions(
+					yozh.WithEnv(envMap()),
+					yozh.WithBootstrap(bsSrc),
+					yozh.WithPolyfill(polyfillSrc),
+					yozh.WithSelfURL(fmt.Sprintf("http://127.0.0.1:%d", port)),
 				),
 			)
 			if err != nil {
@@ -272,15 +272,15 @@ func serveFromPack(ctx context.Context, packPath, addr, cacheDir string, packCac
 		return fmt.Errorf("pack not found: %s", absPackPath)
 	}
 
-	rt, err := astroruntime.NewRuntime(
-		astroruntime.WithPackFile(absPackPath),
-		astroruntime.WithCacheDir(cacheDir),
-		astroruntime.WithPackCacheSize(packCacheSize),
-		astroruntime.WithPoolOptions(
-			astroruntime.WithEnv(envMap()),
-			astroruntime.WithBootstrap(bsSrc),
-			astroruntime.WithPolyfill(polyfillSrc),
-			astroruntime.WithSelfURL(fmt.Sprintf("http://127.0.0.1:%d", port)),
+	rt, err := yozh.NewRuntime(
+		yozh.WithPackFile(absPackPath),
+		yozh.WithCacheDir(cacheDir),
+		yozh.WithPackCacheSize(packCacheSize),
+		yozh.WithPoolOptions(
+			yozh.WithEnv(envMap()),
+			yozh.WithBootstrap(bsSrc),
+			yozh.WithPolyfill(polyfillSrc),
+			yozh.WithSelfURL(fmt.Sprintf("http://127.0.0.1:%d", port)),
 		),
 	)
 	if err != nil {
@@ -294,7 +294,7 @@ func serveFromPack(ctx context.Context, packPath, addr, cacheDir string, packCac
 }
 
 // serveWithShutdown runs rt.ListenAndServe and gracefully shuts down on SIGTERM/SIGINT.
-func serveWithShutdown(ctx context.Context, rt *astroruntime.Runtime, addr string) error {
+func serveWithShutdown(ctx context.Context, rt *yozh.Runtime, addr string) error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(quit)

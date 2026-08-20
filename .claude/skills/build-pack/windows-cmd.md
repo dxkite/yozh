@@ -1,7 +1,7 @@
 # Windows 命令参考（PowerShell）
 
 对应 [SKILL.md](./SKILL.md) 场景一（集成测试数据）的 Windows 等效命令。  
-所有命令在 `astro-runtime/astro-runtime` 下执行。
+所有命令在 `yozh/yozh` 下执行。
 
 ---
 
@@ -18,7 +18,7 @@ cd examples\example; pnpm install; cd ..\..
 
 ```powershell
 # 1. 构建 CLI
-go build -o astro-runtime.exe ./cmd
+go build -o yozh.exe ./cmd
 
 # 2. 确认 example 已 build
 Test-Path examples\example\.netlify\build\entry.mjs
@@ -29,12 +29,12 @@ cd examples\example; pnpm build; cd ..\..
 New-Item -ItemType Directory -Force integration\testdata\example | Out-Null
 
 # 4. 生成 bundle.mjs
-.\astro-runtime.exe build --plain `
+.\yozh.exe build --plain `
   --entry examples\example\.netlify\build\entry.mjs `
   --out integration\testdata\example\bundle.mjs
 
 # 5. 生成 example.pack
-.\astro-runtime.exe build --pack `
+.\yozh.exe build --pack `
   --entry examples\example\.netlify\build\entry.mjs `
   --dist examples\example\dist `
   --out integration\testdata\example\example.pack

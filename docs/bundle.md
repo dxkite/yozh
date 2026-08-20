@@ -19,12 +19,12 @@ Astro 的 Netlify 适配器输出的 `entry.mjs` 不是独立可执行文件：�
 
 ## CLI 用法（`cmd/main.go` 现状）
 
-`astro-runtime` 只有 `build` 和 `serve` 两个子命令，均不含 `--bytecodes`/`--ssr` 之类的历史标志。
+`yozh` 只有 `build` 和 `serve` 两个子命令，均不含 `--bytecodes`/`--ssr` 之类的历史标志。
 
 ### build 命令
 
 ```
-astro-runtime build [--entry path] [--kind astro|react] [--pack] [--out path] [--dist dir]
+yozh build [--entry path] [--kind astro|react] [--pack] [--out path] [--dist dir]
 ```
 
 | flag | 默认值 | 说明 |
@@ -49,7 +49,7 @@ BundleSSR(entry) → jsCode（esbuild 打包的自包含 ESM）
 ### serve 命令
 
 ```
-astro-runtime serve [--pack path | --entry path | --bundle path] [--port n] [--dist dir]
+yozh serve [--pack path | --entry path | --bundle path] [--port n] [--dist dir]
                      [--cache-dir dir] [--pack-cache-size n] [--bootstrap file] [--polyfill file]
 ```
 
@@ -234,16 +234,16 @@ shim 源码位于 `js/shims/`，通过 `//go:embed js/shims` 编译进 Go 二进
 
 ```bash
 pnpm build                                   # astro build → .netlify/build/entry.mjs
-astro-runtime build --entry .netlify/build/entry.mjs --out .netlify/build/bundle.mjs
-astro-runtime serve --bundle .netlify/build/bundle.mjs --dist dist
+yozh build --entry .netlify/build/entry.mjs --out .netlify/build/bundle.mjs
+yozh serve --bundle .netlify/build/bundle.mjs --dist dist
 ```
 
 ### 生产部署：.pack（推荐，容器镜像不含 node_modules）
 
 ```bash
-# 构建机：astro build + astro-runtime build --pack
+# 构建机：astro build + yozh build --pack
 pnpm build
-astro-runtime build --pack \
+yozh build --pack \
     --entry .netlify/build/entry.mjs \
     --dist  dist \
     --out   .netlify/build/bundle.pack
@@ -252,7 +252,7 @@ astro-runtime build --pack \
 COPY .netlify/build/bundle.pack /app/bundle.pack
 
 # 启动命令
-CMD ["/app/astro-runtime", "serve", "--pack", "/app/bundle.pack", "--cache-dir", "/cache"]
+CMD ["/app/yozh", "serve", "--pack", "/app/bundle.pack", "--cache-dir", "/cache"]
 ```
 
 `--cache-dir` 非空时，`.pack` 会被解压到 `cacheDir/<sha256>/` 并按 `--pack-cache-size` 做 LRU 淘汰；
@@ -261,7 +261,7 @@ CMD ["/app/astro-runtime", "serve", "--pack", "/app/bundle.pack", "--cache-dir",
 ### 服务器自行打包（无预构建产物）
 
 ```bash
-astro-runtime serve --entry .netlify/build/entry.mjs --dist dist
+yozh serve --entry .netlify/build/entry.mjs --dist dist
 ```
 
 启动时调用 `BundleSSRGoja`（esbuild 打包 + `ConvertBundleForGoja`），需要该目录下有完整

@@ -1,4 +1,4 @@
-package astroruntime
+package yozh
 
 import (
 	"encoding/json"
@@ -7,7 +7,7 @@ import (
 
 	"github.com/grafana/sobek"
 
-	"github.com/dxkite/astro-runtime/pkg/node"
+	"github.com/dxkite/yozh/pkg/node"
 )
 
 // shimRun creates a fresh goja (sobek) runtime, applies optional setup code, registers

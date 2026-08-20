@@ -34,7 +34,7 @@ function Page() {
       <body>
         <h1>React 18 SSR Demo</h1>
         <p>
-          Powered by <strong>astro-runtime</strong> · goja engine ·{' '}
+          Powered by <strong>yozh</strong> · goja engine ·{' '}
           <span className="badge">react18 bootstrap</span>
         </p>
         <h2>商品列表</h2>

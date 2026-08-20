@@ -3,7 +3,7 @@ package integration_test
 import (
 	"testing"
 
-	astroruntime "github.com/dxkite/astro-runtime"
+	"github.com/dxkite/yozh"
 )
 
 // benchBundle is a realistic-shape bundle: evaluates polyfills, registers a handler.
@@ -27,7 +27,7 @@ export default function(config) {
 func BenchmarkNewPool(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		p, err := astroruntime.NewPool(benchBundle, astroruntime.WithSize(1))
+		p, err := yozh.NewPool(benchBundle, yozh.WithSize(1))
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -39,7 +39,7 @@ func BenchmarkNewPool(b *testing.B) {
 func BenchmarkNewPoolSize4(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		p, err := astroruntime.NewPool(benchBundle, astroruntime.WithSize(4))
+		p, err := yozh.NewPool(benchBundle, yozh.WithSize(4))
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -50,7 +50,7 @@ func BenchmarkNewPoolSize4(b *testing.B) {
 // BenchmarkSSRRequestGetPut measures the Get+Put round-trip overhead (no actual JS work).
 // Uses a pool size of 1 so Get/Put always reuses the same runtime without creating extras.
 func BenchmarkSSRRequestGetPut(b *testing.B) {
-	p, err := astroruntime.NewPool(benchBundle, astroruntime.WithSize(1))
+	p, err := yozh.NewPool(benchBundle, yozh.WithSize(1))
 	if err != nil {
 		b.Fatal(err)
 	}

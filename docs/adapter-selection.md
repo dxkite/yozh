@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-**astro-runtime** 面向两个核心场景：
+**yozh** 面向两个核心场景：
 
 ### 1. 网站模板 SSR
 
@@ -26,7 +26,7 @@ Go 后端服务作为 BFF（Backend for Frontend）层，按需将 Astro 页面�
 Go BFF 服务（处理业务逻辑、鉴权、数据聚合）
   │  需要渲染某个 Astro 页面时
   ▼
-astro-runtime（Pool.Get → HandleSSR）
+yozh（Pool.Get → HandleSSR）
   │
   ▼
 goja 运行时（Astro SSR bundle）
@@ -35,7 +35,7 @@ goja 运行时（Astro SSR bundle）
 HTML 字符串（注入到 BFF 响应中）
 ```
 
-在这个模式下，`astro-runtime` 作为 Go 库被引入（`go get github.com/dxkite/astro-runtime`），
+在这个模式下，`yozh` 作为 Go 库被引入（`go get github.com/dxkite/yozh`），
 而不是单独启动的服务。BFF 将 Pool 生命周期与自身绑定，按需调用 `HandleSSR`。
 
 ---

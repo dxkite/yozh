@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	astroruntime "github.com/dxkite/astro-runtime"
-	"github.com/dxkite/astro-runtime/trace"
+	"github.com/dxkite/yozh"
+	"github.com/dxkite/yozh/trace"
 )
 
 // doTrace issues a GET request through pool with the given RequestTrace attached to the context.
-func doTrace(t *testing.T, pool *astroruntime.Pool, path string, rt *trace.RequestTrace) *httptest.ResponseRecorder {
+func doTrace(t *testing.T, pool *yozh.Pool, path string, rt *trace.RequestTrace) *httptest.ResponseRecorder {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, "http://localhost"+path, nil)
 	if err != nil {
@@ -28,7 +28,7 @@ func doTrace(t *testing.T, pool *astroruntime.Pool, path string, rt *trace.Reque
 	if err != nil {
 		t.Fatalf("RequestContext: %v", err)
 	}
-	astroruntime.HandleRequest(rc)
+	yozh.HandleRequest(rc)
 	return w
 }
 
@@ -247,7 +247,7 @@ func TestRequestTraceCompose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	astroruntime.HandleRequest(rc)
+	yozh.HandleRequest(rc)
 
 	mu.Lock()
 	got := append([]entry(nil), events...)
@@ -299,7 +299,7 @@ func TestRequestTracePoolWaiting(t *testing.T) {
 		t.Skip("testdata not available:", err)
 	}
 
-	p, err := astroruntime.NewPool(bundleCode, astroruntime.WithSize(1))
+	p, err := yozh.NewPool(bundleCode, yozh.WithSize(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestRequestTracePoolWaiting(t *testing.T) {
 		}
 		close(held) // runtime checked out
 		<-release   // wait for signal before releasing
-		astroruntime.HandleRequest(rc)
+		yozh.HandleRequest(rc)
 	}()
 	<-held
 
@@ -347,7 +347,7 @@ func TestRequestTracePoolWaiting(t *testing.T) {
 		if err != nil {
 			return
 		}
-		astroruntime.HandleRequest(rc)
+		yozh.HandleRequest(rc)
 	}()
 
 	// Wait for PoolWaiting to fire before releasing the held runtime.
@@ -408,7 +408,7 @@ func TestRequestTraceFetchDone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	astroruntime.HandleRequest(rc)
+	yozh.HandleRequest(rc)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -461,7 +461,7 @@ func TestRequestTraceFetchError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	astroruntime.HandleRequest(rc)
+	yozh.HandleRequest(rc)
 
 	mu.Lock()
 	defer mu.Unlock()

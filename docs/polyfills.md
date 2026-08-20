@@ -1,6 +1,6 @@
 # Polyfill 详解
 
-astro-runtime 唯一的 JS 引擎是 goja（`github.com/grafana/sobek`，纯 Go 实现），它本身是一个
+yozh 唯一的 JS 引擎是 goja（`github.com/grafana/sobek`，纯 Go 实现），它本身是一个
 ECMAScript 引擎，缺少大量浏览器/Node.js 才有的运行时 API（Web API、Node 内建模块、Intl 等）。
 本文档列出每个 polyfill 的存在原因、覆盖边界和已知局限。
 

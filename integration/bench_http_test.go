@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	astroruntime "github.com/dxkite/astro-runtime"
+	"github.com/dxkite/yozh"
 )
 
 // gojaBenchBundle is a realistic ESM-format SSR bundle for goja benchmarks.
@@ -42,22 +42,22 @@ func silenceSlog(b *testing.B) {
 	prev := slog.Default()
 	noop := slog.New(slog.DiscardHandler)
 	slog.SetDefault(noop)
-	astroruntime.SetLogger(astroruntime.NewLogger(slog.DiscardHandler))
+	yozh.SetLogger(yozh.NewLogger(slog.DiscardHandler))
 	b.Cleanup(func() {
 		slog.SetDefault(prev)
-		astroruntime.SetLogger(astroruntime.NewLogger(prev.Handler()))
+		yozh.SetLogger(yozh.NewLogger(prev.Handler()))
 	})
 }
 
 // ssrHTTPHandler wraps a Pool as an http.Handler for use with httptest.Server.
-func ssrHTTPHandler(pool *astroruntime.Pool) http.Handler {
+func ssrHTTPHandler(pool *yozh.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rc, err := pool.RequestContext(w, r)
 		if err != nil {
 			http.Error(w, "pool exhausted", http.StatusServiceUnavailable)
 			return
 		}
-		astroruntime.HandleRequest(rc)
+		yozh.HandleRequest(rc)
 	})
 }
 
@@ -130,23 +130,23 @@ func startNodeServer(b *testing.B, port string) string {
 	return "http://localhost:" + port
 }
 
-// ── astro-runtime (Go + goja, real Astro app) ─────────────────────────────────
+// ── yozh (Go + goja, real Astro app) ─────────────────────────────────
 
-func BenchmarkHTTP_AstroRuntime_Home(b *testing.B) {
+func BenchmarkHTTP_Yozh_Home(b *testing.B) {
 	silenceSlog(b)
 	srv := httptest.NewServer(ssrHTTPHandler(sharedPool))
 	b.Cleanup(srv.Close)
 	hammerHTTP(b, srv.URL, "/")
 }
 
-func BenchmarkHTTP_AstroRuntime_API(b *testing.B) {
+func BenchmarkHTTP_Yozh_API(b *testing.B) {
 	silenceSlog(b)
 	srv := httptest.NewServer(ssrHTTPHandler(sharedPool))
 	b.Cleanup(srv.Close)
 	hammerHTTP(b, srv.URL, "/api/products")
 }
 
-func BenchmarkHTTP_AstroRuntime_Dynamic(b *testing.B) {
+func BenchmarkHTTP_Yozh_Dynamic(b *testing.B) {
 	silenceSlog(b)
 	srv := httptest.NewServer(ssrHTTPHandler(sharedPool))
 	b.Cleanup(srv.Close)

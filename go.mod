@@ -1,4 +1,4 @@
-module github.com/dxkite/astro-runtime
+module github.com/dxkite/yozh
 
 go 1.25.0
 

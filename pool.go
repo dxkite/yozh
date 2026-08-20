@@ -1,4 +1,4 @@
-package astroruntime
+package yozh
 
 import (
 	"context"
@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dxkite/astro-runtime/pkg/node"
-	sobek "github.com/dxkite/astro-runtime/pkg/sobek"
-	"github.com/dxkite/astro-runtime/trace"
+	"github.com/dxkite/yozh/pkg/node"
+	sobek "github.com/dxkite/yozh/pkg/sobek"
+	"github.com/dxkite/yozh/trace"
 )
 
 // poolConfig holds resolved configuration for NewPool.

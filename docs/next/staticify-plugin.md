@@ -69,16 +69,16 @@ await __host_fetch_raw(url, method, headers, body)
 
 | 当前名称 | 标准化名称 | WASM import |
 |---------|----------|-------------|
-| `__go_sendHeaders` | `__host_send_headers` | `astro-runtime.send_headers` |
-| `__go_sendChunk` | `__host_send_chunk` | `astro-runtime.send_chunk` |
-| `__go_endStream` | `__host_end_stream` | `astro-runtime.end_stream` |
-| `__go_fetchRaw` | `__host_fetch_raw` | `astro-runtime.fetch_raw` |
-| `__go_urlParse` | `__host_url_parse` | `astro-runtime.url_parse` |
-| `__go_textEncodeUTF8` | `__host_text_encode` | `astro-runtime.text_encode` |
-| `__go_textDecodeUTF8` | `__host_text_decode` | `astro-runtime.text_decode` |
-| `__go_arrayBufToStr` | `__host_arraybuf_to_str` | `astro-runtime.arraybuf_to_str` |
-| `__go_cryptoRandomBytes` | `__host_crypto_random` | `astro-runtime.crypto_random` |
-| `__go_cryptoSubtleDigest` | `__host_crypto_digest` | `astro-runtime.crypto_digest` |
+| `__go_sendHeaders` | `__host_send_headers` | `yozh.send_headers` |
+| `__go_sendChunk` | `__host_send_chunk` | `yozh.send_chunk` |
+| `__go_endStream` | `__host_end_stream` | `yozh.end_stream` |
+| `__go_fetchRaw` | `__host_fetch_raw` | `yozh.fetch_raw` |
+| `__go_urlParse` | `__host_url_parse` | `yozh.url_parse` |
+| `__go_textEncodeUTF8` | `__host_text_encode` | `yozh.text_encode` |
+| `__go_textDecodeUTF8` | `__host_text_decode` | `yozh.text_decode` |
+| `__go_arrayBufToStr` | `__host_arraybuf_to_str` | `yozh.arraybuf_to_str` |
+| `__go_cryptoRandomBytes` | `__host_crypto_random` | `yozh.crypto_random` |
+| `__go_cryptoSubtleDigest` | `__host_crypto_digest` | `yozh.crypto_digest` |
 
 ### 4. `process.env` 动态读取 — 编译时展开
 
@@ -112,7 +112,7 @@ const now = __host_time_now()
 const r = __host_random_f64()
 ```
 
-对应新增 WASM import：`astro-runtime.time_now`、`astro-runtime.random_f64`。
+对应新增 WASM import：`yozh.time_now`、`yozh.random_f64`。
 
 ## 不处理的模式（保留原样，js2wasm 决定是否支持）
 

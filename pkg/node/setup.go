@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	sobek "github.com/dxkite/astro-runtime/pkg/sobek"
+	sobek "github.com/dxkite/yozh/pkg/sobek"
 )
 
 // SetupNodeGlobals injects the Node.js process global into a JS runtime.

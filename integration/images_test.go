@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	astroruntime "github.com/dxkite/astro-runtime"
+	"github.com/dxkite/yozh"
 )
 
 // distFS points to examples/example/dist — built by `pnpm astro build` in examples/example.
@@ -26,7 +26,7 @@ func imageReq(t *testing.T, query string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/.netlify/images?"+query, nil)
 	w := httptest.NewRecorder()
-	astroruntime.HandleImageCDN(distFS, w, req)
+	yozh.HandleImageCDN(distFS, w, req)
 	return w
 }
 
@@ -177,7 +177,7 @@ func TestImageCDNFromPack(t *testing.T) {
 	}
 	req := httptest.NewRequest("GET", "/.netlify/images?url=/images/test.png&w=8&fm=png", nil)
 	w := httptest.NewRecorder()
-	astroruntime.HandleImageCDN(packRT.DistFS(), w, req)
+	yozh.HandleImageCDN(packRT.DistFS(), w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d; body: %.100s", w.Code, w.Body.String())
 	}

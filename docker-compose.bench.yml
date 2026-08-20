@@ -1,5 +1,5 @@
 services:
-  astro-runtime-goja:
+  yozh-goja:
     build:
       context: .
       dockerfile: Dockerfile

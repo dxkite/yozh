@@ -1,7 +1,7 @@
 ---
 name: build-pack
 version: 1.2.0
-description: "打包产物管理：① 集成测试数据——将 examples/example 构建为 integration/testdata/example/bundle.mjs 和 example.pack；② 生产环境部署——将 astro-koharu 的 SSR bundle 打包为 .pack 并更新 Docker 容器。触发场景：修改 astro-runtime 源码或 Astro 应用后需更新产物、首次搭建集成测试环境、运行 go test ./integration/... 前、生产/测试容器需热更新时。"
+description: "打包产物管理：① 集成测试数据——将 examples/example 构建为 integration/testdata/example/bundle.mjs 和 example.pack；② 生产环境部署——将 astro-koharu 的 SSR bundle 打包为 .pack 并更新 Docker 容器。触发场景：修改 yozh 源码或 Astro 应用后需更新产物、首次搭建集成测试环境、运行 go test ./integration/... 前、生产/测试容器需热更新时。"
 ---
 
 # build-pack 工作规范
@@ -17,7 +17,7 @@ Windows 命令见 [windows-cmd.md](./windows-cmd.md)。
 
 ## 场景一：集成测试数据
 
-所有命令在 `astro-runtime/astro-runtime` 下执行。
+所有命令在 `yozh/yozh` 下执行。
 
 ### 前置条件
 
@@ -34,7 +34,7 @@ cd examples/example && pnpm install && cd ../..
 
 ```bash
 # 1. 构建 CLI
-go build -o astro-runtime ./cmd
+go build -o yozh ./cmd
 
 # 2. 确认 example 已 build，否则先构建
 ls examples/example/.netlify/build/entry.mjs \
@@ -44,12 +44,12 @@ ls examples/example/.netlify/build/entry.mjs \
 mkdir -p integration/testdata/example
 
 # 4. 生成 bundle.mjs
-./astro-runtime build --plain \
+./yozh build --plain \
   --entry examples/example/.netlify/build/entry.mjs \
   --out integration/testdata/example/bundle.mjs
 
 # 5. 生成 example.pack
-./astro-runtime build --pack \
+./yozh build --pack \
   --entry examples/example/.netlify/build/entry.mjs \
   --dist examples/example/dist \
   --out integration/testdata/example/example.pack
@@ -72,11 +72,11 @@ go test ./integration/...
 
 | 容器 | 端口 | pack 来源 |
 |------|------|----------|
-| `astro-runtime-astro-run-*` | 8892 | `/tmp/koharu.pack` |
-| `astro-runtime-astro-1` | 8891 | `/tmp/koharu.pack` |
+| `yozh-astro-run-*` | 8892 | `/tmp/koharu.pack` |
+| `yozh-astro-1` | 8891 | `/tmp/koharu.pack` |
 | `koharu` | 4321 | 独立构建（nginx 静态） |
 
-容器入口：`./astro-runtime serve --pack /data/bundle.pack --port 8080 --cache-dir /cache`
+容器入口：`./yozh serve --pack /data/bundle.pack --port 8080 --cache-dir /cache`
 
 ### 完整 rebuild 流程
 
@@ -87,26 +87,26 @@ pnpm exec astro build --config astro.ssr.config.mjs
 # 产物：.netlify/build/entry.mjs
 
 # 2. 打包为 .pack
-cd /path/to/astro-runtime/astro-runtime
+cd /path/to/yozh/yozh
 go run ./cmd build --pack \
   --entry /path/to/astro-koharu/.netlify/build/entry.mjs \
   --dist /path/to/astro-koharu/dist \
   --out /tmp/koharu.pack
 
 # 3. 重启容器
-docker restart astro-runtime-astro-run-ba26d28229d1
+docker restart yozh-astro-run-ba26d28229d1
 
 # 4. 验证
 curl -s -o /dev/null -w "%{http_code}" http://localhost:8892/post/<slug>
 # 期望：200
-docker logs astro-runtime-astro-run-ba26d28229d1 --since 60s 2>&1 | grep -i error
+docker logs yozh-astro-run-ba26d28229d1 --since 60s 2>&1 | grep -i error
 # 期望：无输出
 ```
 
 ### 仅重建容器镜像（修改了 Go 源码时）
 
 ```bash
-cd /path/to/astro-runtime/astro-runtime
+cd /path/to/yozh/yozh
 PACK_FILE=/tmp/koharu.pack PORT=8892 docker compose up -d --build
 ```
 
@@ -119,7 +119,7 @@ PACK_FILE=/tmp/koharu.pack PORT=8892 docker compose up -d --build
 | 文件 | 输出模式 | 用途 |
 |------|---------|------|
 | `astro.config.mjs` | 静态（SSG） | `pnpm build`、nginx 部署 |
-| `astro.ssr.config.mjs` | `output: 'server'` + Netlify 适配器 | astro-runtime |
+| `astro.ssr.config.mjs` | `output: 'server'` + Netlify 适配器 | yozh |
 
 **SSR 模式差异**：`getStaticPaths()` 的 `props` 在请求时不传递，页面只能通过 `Astro.params` 获取 URL 参数。依赖 `Astro.props` 的页面需实现 slug 降级查找。
 

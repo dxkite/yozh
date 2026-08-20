@@ -1,4 +1,4 @@
-package astroruntime
+package yozh
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dxkite/astro-runtime/trace"
+	"github.com/dxkite/yozh/trace"
 )
 
 // spanLog is an internal RequestTrace that accumulates per-request timing for the ssr spans log.

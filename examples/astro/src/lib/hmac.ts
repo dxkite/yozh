@@ -1,5 +1,5 @@
 // HMAC-SHA-256 helpers for signing and verifying session tokens.
-// Demonstrates Web Crypto API usage within the astro-runtime JS runtime.
+// Demonstrates Web Crypto API usage within the yozh JS runtime.
 const SECRET = import.meta.env.SESSION_SECRET ?? 'dev-secret';
 
 async function importKey(usage: KeyUsage[]): Promise<CryptoKey> {

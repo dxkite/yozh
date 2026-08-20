@@ -1,4 +1,4 @@
-package astroruntime
+package yozh
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	sobek "github.com/dxkite/astro-runtime/pkg/sobek"
+	sobek "github.com/dxkite/yozh/pkg/sobek"
 )
 
 // newGojaCtx creates a fresh sobek context with an empty polyfill setup for testing.

@@ -26,7 +26,7 @@ package js2wasm
 func Compile(src []byte, opts Options) ([]byte, error)
 
 type Options struct {
-    // HostModule 是 WASM import 的模块名，默认 "astro-runtime"
+    // HostModule 是 WASM import 的模块名，默认 "yozh"
     HostModule string
 
     // HostFuncs 声明 JS 中 __host_xxx 调用对应的 WASM import 签名
@@ -187,7 +187,7 @@ magic bytes: \0asm
 version:     0x01000000
 
 Section 1  (Type)      函数签名列表
-Section 2  (Import)    宿主函数 import（astro-runtime.xxx）
+Section 2  (Import)    宿主函数 import（yozh.xxx）
 Section 3  (Function)  函数类型索引
 Section 5  (Memory)    线性内存声明
 Section 7  (Export)    导出函数（__handle_request, __request_init）
@@ -211,27 +211,27 @@ Section 11 (Data)      字符串常量
 
 | 模块 | 函数 | 用途 |
 |------|------|------|
-| `astro-runtime` | `send_headers` | 发送 HTTP 响应头 |
-| `astro-runtime` | `send_chunk` | 发送响应体块 |
-| `astro-runtime` | `end_stream` | 结束流式响应 |
-| `astro-runtime` | `fetch_raw` | 同步 HTTP 请求（宿主阻塞实现） |
-| `astro-runtime` | `url_parse` | URL 解析 |
-| `astro-runtime` | `text_encode` | UTF-8 编码 |
-| `astro-runtime` | `text_decode` | UTF-8 解码 |
-| `astro-runtime` | `crypto_random` | 随机字节 |
-| `astro-runtime` | `crypto_digest` | 哈希摘要 |
-| `astro-runtime` | `time_now` | 当前时间戳（ms） |
-| `astro-runtime` | `random_f64` | `[0,1)` 随机浮点 |
+| `yozh` | `send_headers` | 发送 HTTP 响应头 |
+| `yozh` | `send_chunk` | 发送响应体块 |
+| `yozh` | `end_stream` | 结束流式响应 |
+| `yozh` | `fetch_raw` | 同步 HTTP 请求（宿主阻塞实现） |
+| `yozh` | `url_parse` | URL 解析 |
+| `yozh` | `text_encode` | UTF-8 编码 |
+| `yozh` | `text_decode` | UTF-8 解码 |
+| `yozh` | `crypto_random` | 随机字节 |
+| `yozh` | `crypto_digest` | 哈希摘要 |
+| `yozh` | `time_now` | 当前时间戳（ms） |
+| `yozh` | `random_f64` | `[0,1)` 随机浮点 |
 
-## 与 astro-runtime 的集成
+## 与 yozh 的集成
 
 ```go
-// astro-runtime/wasm_compile.go
+// yozh/wasm_compile.go
 import "github.com/dxkite/js2wasm"
 
 func CompileJSToWasm(staticJS []byte) ([]byte, error) {
     wasmBytes, err := js2wasm.Compile(staticJS, js2wasm.Options{
-        HostModule: "astro-runtime",
+        HostModule: "yozh",
         HostFuncs:  astroHostFuncs,  // 固定列表，与 wasm_hostfuncs.go 对应
     })
     if errors.Is(err, js2wasm.ErrUnsupported) {
@@ -242,7 +242,7 @@ func CompileJSToWasm(staticJS []byte) ([]byte, error) {
 }
 ```
 
-astro-runtime 的构建流程：
+yozh 的构建流程：
 
 ```
 go run ./cmd build --wasm --entry entry.mjs --out bundle.pack
@@ -256,7 +256,7 @@ go run ./cmd build --wasm --entry entry.mjs --out bundle.pack
 
 ```
 js2wasm.Compile() 返回 ErrUnsupported
-  → astro-runtime 降级：不编译 WASM，直接把 bundle 作为普通 ESM 源码交给 goja Pool（唯一的运行时引擎）求值
+  → yozh 降级：不编译 WASM，直接把 bundle 作为普通 ESM 源码交给 goja Pool（唯一的运行时引擎）求值
   → 记录日志：哪个 JS 构造触发了降级
   → 仍输出可用的 bundle.pack（包含 bundle.mjs，不含 bundle.wasm）
 ```

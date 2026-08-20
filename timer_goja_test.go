@@ -1,12 +1,12 @@
-package astroruntime
+package yozh
 
 import (
 	"fmt"
 	"testing"
 	"time"
 
-	"github.com/dxkite/astro-runtime/pkg/node"
-	sobek "github.com/dxkite/astro-runtime/pkg/sobek"
+	"github.com/dxkite/yozh/pkg/node"
+	sobek "github.com/dxkite/yozh/pkg/sobek"
 )
 
 func newTimerCtx(t *testing.T) sobek.JSContext {

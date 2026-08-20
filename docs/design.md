@@ -1,4 +1,4 @@
-# astro-runtime 设计文档
+# yozh 设计文档
 
 ## 项目目标
 
@@ -111,7 +111,7 @@ serve --pack
 ### 1. `internal/runtime` 包隔离引擎实现
 
 所有引擎逻辑（接口定义、goja 实现、polyfill 加载、bootstrap embed、host functions、crypto、http fetch）均位于 `internal/runtime/`（package `jsruntime`）。
-根包（`package astroruntime`）仅保留公共 API 类型别名和面向用户的 Pool/Runtime 层，不直接引用任何引擎实现细节。
+根包（`package yozh`）仅保留公共 API 类型别名和面向用户的 Pool/Runtime 层，不直接引用任何引擎实现细节。
 目的：避免根包膨胀，保持公共 API 与引擎实现解耦（历史上曾用于支持多引擎切换，现仅剩 goja 一种实现）。
 
 ### 2. 单引擎：goja/sobek

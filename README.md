@@ -1,11 +1,11 @@
-# astro-runtime
+# yozh
 
 在不依赖 Node.js 或任何云平台 CLI 的情况下，运行 `@astrojs/netlify` 适配器编译的 Astro SSR 应用。
 
 JS 引擎基于 [goja/sobek](https://github.com/grafana/sobek)（纯 Go，无 WASM）。单个静态 Go 二进制，零运行时依赖。
 
 ```bash
-astro-runtime serve --pack bundle.pack --port 8888
+yozh serve --pack bundle.pack --port 8888
 ```
 
 ---
@@ -29,11 +29,11 @@ astro-runtime serve --pack bundle.pack --port 8888
 ### 1. 构建
 
 ```bash
-go install github.com/dxkite/astro-runtime/cmd@latest
+go install github.com/dxkite/yozh/cmd@latest
 # 或从源码
-git clone https://github.com/dxkite/astro-runtime
-cd astro-runtime
-go build -o astro-runtime ./cmd
+git clone https://github.com/dxkite/yozh
+cd yozh
+go build -o yozh ./cmd
 ```
 
 ### 2. 打包 Astro 项目
@@ -44,7 +44,7 @@ cd your-astro-project
 pnpm exec astro build
 
 # 生成 bundle.pack（单文件，含 goja bundle + 静态资产）
-astro-runtime build --pack \
+yozh build --pack \
   --entry .netlify/build/entry.mjs \
   --dist dist \
   --out bundle.pack
@@ -53,7 +53,7 @@ astro-runtime build --pack \
 ### 3. 启动服务
 
 ```bash
-astro-runtime serve --pack bundle.pack --port 8888
+yozh serve --pack bundle.pack --port 8888
 # → http://localhost:8888
 ```
 
@@ -64,7 +64,7 @@ astro-runtime serve --pack bundle.pack --port 8888
 ### `build` — 打包 Astro SSR 产物
 
 ```
-astro-runtime build [--pack] --entry <path> [options]
+yozh build [--pack] --entry <path> [options]
 ```
 
 | 参数 | 说明 |
@@ -78,7 +78,7 @@ astro-runtime build [--pack] --entry <path> [options]
 ### `serve` — 启动 SSR HTTP 服务
 
 ```
-astro-runtime serve [--pack <path> | --bundle <path> | --entry <path>] [options]
+yozh serve [--pack <path> | --bundle <path> | --entry <path>] [options]
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -88,7 +88,7 @@ astro-runtime serve [--pack <path> | --bundle <path> | --entry <path>] [options]
 | `--entry` | — | SSR entry（启动时实时打包，适合开发） |
 | `--dist` | `dist` | 静态资产目录（`--bundle` / `--entry` 时使用） |
 | `--port` | `8888` | 监听端口 |
-| `--cache-dir` | `$XDG_CACHE_HOME/astro-runtime` | pack 解压缓存目录（空字符串禁用） |
+| `--cache-dir` | `$XDG_CACHE_HOME/yozh` | pack 解压缓存目录（空字符串禁用） |
 | `--pack-cache-size` | `0`（默认 3） | 最多保留的解压缓存目录数（负数为不限） |
 | `--bootstrap` | — | 自定义 bootstrap `.js` 文件路径 |
 | `--polyfill` | — | 替换全部内置 polyfill 的 JS 文件路径 |
@@ -100,15 +100,15 @@ astro-runtime serve [--pack <path> | --bundle <path> | --entry <path>] [options]
 ## Docker 部署
 
 ```dockerfile
-FROM ghcr.io/dxkite/astro-runtime:latest
-# 或自行构建：docker build -t astro-runtime .
+FROM ghcr.io/dxkite/yozh:latest
+# 或自行构建：docker build -t yozh .
 ```
 
 ```yaml
 # docker-compose.yml
 services:
   app:
-    image: astro-runtime
+    image: yozh
     ports:
       - "8080:8080"
     volumes:
@@ -126,18 +126,18 @@ volumes:
 ## 作为 Go 库使用
 
 ```go
-import astroruntime "github.com/dxkite/astro-runtime"
+import yozh "github.com/dxkite/yozh"
 ```
 
 ### 从 pack 文件启动服务
 
 ```go
-rt, err := astroruntime.NewRuntime(
-    astroruntime.WithPackFile("bundle.pack"),
-    astroruntime.WithCacheDir("/tmp/astro-cache"),
-    astroruntime.WithPoolOptions(
-        astroruntime.WithEnv(map[string]string{"NODE_ENV": "production"}),
-        astroruntime.WithSize(4),
+rt, err := yozh.NewRuntime(
+    yozh.WithPackFile("bundle.pack"),
+    yozh.WithCacheDir("/tmp/astro-cache"),
+    yozh.WithPoolOptions(
+        yozh.WithEnv(map[string]string{"NODE_ENV": "production"}),
+        yozh.WithSize(4),
     ),
 )
 if err != nil {
@@ -151,9 +151,9 @@ log.Fatal(rt.ListenAndServe(":8888"))
 ### 嵌入现有 HTTP 服务（BFF 模式）
 
 ```go
-rt, _ := astroruntime.NewRuntime(
-    astroruntime.WithPack(packBytes),
-    astroruntime.WithPoolOptions(astroruntime.WithSize(2)),
+rt, _ := yozh.NewRuntime(
+    yozh.WithPack(packBytes),
+    yozh.WithPoolOptions(yozh.WithSize(2)),
 )
 defer rt.Close()
 
@@ -166,8 +166,8 @@ http.ListenAndServe(":8080", mux)
 
 ```go
 // entry.mjs → esbuild 内联 → goja 格式转换 → .pack
-jsCode, _ := astroruntime.BundleSSR("/path/to/entry.mjs")
-err = astroruntime.BuildPack("bundle.pack", jsCode, "/path/to/dist")
+jsCode, _ := yozh.BundleSSR("/path/to/entry.mjs")
+err = yozh.BuildPack("bundle.pack", jsCode, "/path/to/dist")
 ```
 
 ---
@@ -188,7 +188,7 @@ goja 是纯 Go 实现，无需 WASM 初始化，冷启动很快。
 
 轻计算的 JSON API / 动态路由场景下，V8 JIT 领先明显；而在高并发、含 outbound fetch 的复杂页面渲染场景下，Go pool 的并发模型可以反超 Node.js 单线程事件循环。完整数据见 [docs/benchmark.md](./docs/benchmark.md)。
 
-**镜像大小**：astro-runtime ~42 MB vs Node.js SSR 228 MB（小 **5.4×**）。
+**镜像大小**：yozh ~42 MB vs Node.js SSR 228 MB（小 **5.4×**）。
 
 ---
 
@@ -215,12 +215,12 @@ cd examples/example
 pnpm install && pnpm build
 
 # pack 模式
-../../astro-runtime build --pack \
+../../yozh build --pack \
   --entry .netlify/build/entry.mjs --dist dist --out example.pack
-../../astro-runtime serve --pack example.pack --port 8888
+../../yozh serve --pack example.pack --port 8888
 
 # 直接 serve（开发）
-../../astro-runtime serve \
+../../yozh serve \
   --entry .netlify/build/entry.mjs --dist dist --port 8888
 ```
 
